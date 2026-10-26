@@ -22,6 +22,7 @@ interface StartInfo {
   plattform: string
 }
 interface Plan { pakete: string[]; laden: { pfad: string; bytes: number }[]; loeschen: string[]; bytes_gesamt: number; bytes_zu_laden: number; unbekannt: string[] }
+interface UpdateInfo { verfuegbar: boolean; version?: string | null; notizen?: string | null; hinweis?: string | null }
 interface Fortschritt { pfad: string; geladen: number; gesamt: number; stand: 'laeuft' | 'fertig' | 'fehler'; meldung?: string | null }
 
 const z = {
@@ -41,6 +42,8 @@ const z = {
   hinweis: '' as string,
   /** Anmeldung für die Daten (CS4): null = noch nicht abgefragt. */
   anmeldung: null as { noetig: boolean; angemeldet: boolean } | null,
+  /** Update des Clients (CS9): Ergebnis der letzten Prüfung. */
+  update: null as UpdateInfo | null,
 }
 
 const SCHRITTE: { id: Schritt; titel: string }[] = [
@@ -185,13 +188,43 @@ async function oeffnen() {
   }
 }
 
-/** Gespeicherten Server neu prüfen, dann direkt zur Oberfläche. */
+/** Update-Manifest des Servers fragen; ein Fehler hält den Start nicht auf. */
+let updateLaeuft = false
+async function updatePruefen() {
+  if (updateLaeuft) return
+  updateLaeuft = true
+  try {
+    z.update = await invoke<UpdateInfo>('update_pruefen')
+  } catch (e) {
+    z.update = { verfuegbar: false, hinweis: fehlerText(e) }
+  } finally {
+    updateLaeuft = false
+  }
+}
+
+async function updateInstallieren() {
+  z.beschaeftigt = true; z.fehler = ''; zeichne()
+  try {
+    await invoke('update_installieren') // startet den Client danach neu
+  } catch (e) {
+    z.fehler = fehlerText(e)
+    z.beschaeftigt = false; zeichne()
+  }
+}
+
+/** Gespeicherten Server neu prüfen, dann direkt zur Oberfläche — außer es
+ *  wartet ein Update, dann fragt die Startseite. */
 async function automatischStarten() {
   const e = z.info!.einstellungen
   z.beschaeftigt = true; zeichne()
   try {
     z.konfig = await invoke<ClientKonfig>('konfig_pruefen', { eingabe: e.konfig_adresse ?? '' })
     await invoke('einrichtung_speichern', { ordner: z.ordner })
+    await updatePruefen()
+    if (z.update?.verfuegbar) {
+      z.beschaeftigt = false; zeichne()
+      return
+    }
     await invoke('oberflaeche_oeffnen')
   } catch (err) {
     z.fehler = fehlerText(err)
@@ -216,7 +249,24 @@ function fehlerFeld(): Kind {
   return z.fehler ? h('div', { class: 'meldung fehler', role: 'alert' }, z.fehler) : null
 }
 
+function ansichtUpdate(): HTMLElement {
+  const u = z.update!
+  return h('section', { class: 'inhalt' },
+    h('h1', {}, `Neue Version ${u.version ?? ''} verfügbar`),
+    h('p', { class: 'einleitung' },
+      'Der Server bietet eine neue Version des LeadLab-Clients an. Das Update ist signiert; der Client startet danach neu.'),
+    u.notizen ? h('div', { class: 'panel' }, h('p', {}, u.notizen)) : null,
+    z.beschaeftigt ? h('p', {}, h('span', { class: 'dreht', 'aria-hidden': 'true' }), ' Update wird geladen …') : null,
+    fehlerFeld(),
+    !z.beschaeftigt && h('div', { class: 'knoepfe' },
+      h('button', { class: 'sekundaer links', onclick: oeffnen }, 'Später, LeadLab öffnen'),
+      h('button', { class: 'primaer', onclick: updateInstallieren }, 'Jetzt aktualisieren'),
+    ),
+  )
+}
+
 function ansichtStart(): HTMLElement {
+  if (z.update?.verfuegbar) return ansichtUpdate()
   const adr = z.info?.einstellungen.konfig_adresse ?? ''
   return h('section', { class: 'inhalt' },
     h('h1', {}, z.beschaeftigt ? 'Verbinde mit dem Server …' : 'Server nicht erreichbar'),
@@ -419,8 +469,13 @@ function ansichtLaden(): HTMLElement {
 }
 
 function ansichtFertig(): HTMLElement {
+  if (z.update === null) void updatePruefen().then(zeichne)
   return h('section', { class: 'inhalt' },
     h('h1', {}, 'LeadLab ist eingerichtet'),
+    z.update?.verfuegbar
+      ? h('div', { class: 'panel meldung ok' }, `Neue Client-Version ${z.update.version ?? ''} verfügbar. `,
+          h('button', { class: 'sekundaer', onclick: updateInstallieren, disabled: z.beschaeftigt }, 'Jetzt aktualisieren'))
+      : null,
     h('p', { class: 'einleitung' }, z.hinweis || 'Die gewählten Daten liegen auf diesem Rechner. Updates holt der Client über „LeadLab › Daten verwalten“.'),
     fehlerFeld(),
     h('div', { class: 'knoepfe' },

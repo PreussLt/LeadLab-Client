@@ -87,6 +87,39 @@ docker run --rm -v "$PWD:/c" -v leadlab-client-cargo:/usr/local/cargo/registry \
   -v leadlab-client-target:/c/src-tauri/target -w /c/src-tauri leadlab-client-bau cargo test
 ```
 
+## Release und Updates
+
+Die Release-CI ([`.github/workflows/release.yml`](.github/workflows/release.yml))
+baut bei einem Tag `v<version>` (gleich `version` in `package.json`) auf
+Windows NSIS und MSI, auf Linux AppImage und deb, signiert die
+Update-Artefakte und legt alles mit `latest.json` als **Entwurf** ins
+GitHub-Release.
+
+Einmalig einrichten:
+
+1. Schlüssel erzeugen: `npm run tauri signer generate -- -w ~/.tauri/leadlab-client.key`.
+   Die private Datei bleibt außerhalb des Repos.
+2. Inhalt von `leadlab-client.key.pub` in `src-tauri/tauri.conf.json` unter
+   `plugins.updater.pubkey` statt des Platzhalters eintragen und committen.
+   Solange dort der Platzhalter steht, prüft der Client keine Updates, und die
+   Release-CI bricht ab.
+3. Im Repo die Secrets `TAURI_SIGNING_PRIVATE_KEY` (Inhalt der privaten Datei)
+   und `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` anlegen.
+
+Ausliefern: Die Arbeitsplätze laden das Update vom eigenen Server
+(`client_update` der Konfigurationsadresse, nginx `/daten/client/` ohne
+Anmeldung). Dafür `latest.json` umschreiben und mit den Dateien in das Volume
+`daten-auslieferung` legen:
+
+```bash
+node werkzeug/update-manifest.mjs latest.json https://<domain>/daten/client/ > update.json
+# update.json + die genannten Installer nach <daten-auslieferung>/client/
+```
+
+Lokal geht `npx tauri build --bundles deb,appimage` ohne Schlüssel. Die
+Update-Artefakte schaltet erst `--config src-tauri/tauri.release.conf.json`
+ein.
+
 ## Aufbau
 
 | Datei | Aufgabe |
@@ -98,6 +131,8 @@ docker run --rm -v "$PWD:/c" -v leadlab-client-cargo:/usr/local/cargo/registry \
 | `src-tauri/src/ablage.rs` | Datenordner, sichere Pfade, Zustand, freier Speicher |
 | `src-tauri/src/laden.rs` | Downloader mit Range, SHA-256 und Spiegeln |
 | `src-tauri/src/anmeldung.rs` | OIDC PKCE mit Loopback-Rückruf, Token im Schlüsselbund |
+| `src-tauri/src/aktualisierung.rs` | Update-Prüfung gegen `client_update` (tauri-plugin-updater) |
+| `werkzeug/update-manifest.mjs` | `latest.json` → `update.json` mit Adressen des eigenen Servers |
 | `src-tauri/src/lokal.rs` | Loopback-Server für lokale Pakete, Initialisierungsskript |
 | `src-tauri/src/pmtiles.rs` | PMTiles v3 lesen (Hilbert-Ids, Blattverzeichnisse) |
 | `src-tauri/src/lib.rs` | Tauri-Befehle, Menü, Navigation zur Server-Oberfläche |
@@ -107,6 +142,10 @@ docker run --rm -v "$PWD:/c" -v leadlab-client-cargo:/usr/local/cargo/registry \
 Fenster kann keine Befehle aufrufen. Ein Katalog kann nicht außerhalb des
 Datenordners schreiben (`ablage::sicherer_pfad`).
 
-## Offen (Folgepakete im Hauptrepo)
+## Offen
 
-- **CS9 #764** Release-CI und Auto-Update.
+- Ende-zu-Ende im echten Fenster: Server-Oberfläche per https mit lokalen
+  Kacheln vom Loopback (WebView2 unter Windows, WebKitGTK unter Linux).
+- Prüfung der optionalen Katalog-Signatur (`daten.signatur_schluessel`,
+  `katalog.json.sig`, Ed25519). Der Server legt sie mit `--signieren` an, der
+  Client prüft sie noch nicht.

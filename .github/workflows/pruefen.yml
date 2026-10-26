@@ -1,6 +1,6 @@
 # Tests und Kompilierprobe auf Linux und Windows bei jedem Push.
-# Release-Pakete (NSIS/MSI, AppImage/deb) und Updater folgen mit CS9
-# (LeadLab-Hauptrepo #764).
+# Release-Pakete (NSIS/MSI, AppImage/deb) und signierte Updates baut
+# release.yml bei einem Tag (CS9, LeadLab-Hauptrepo #764).
 name: Prüfen
 on:
   push:

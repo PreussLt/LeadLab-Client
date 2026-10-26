@@ -9,6 +9,7 @@
 //! geht es über das Fenstermenü („Daten verwalten“, „Server wechseln“).
 
 pub mod ablage;
+pub mod aktualisierung;
 pub mod anmeldung;
 pub mod einstellungen;
 pub mod fehler;
@@ -49,6 +50,8 @@ struct AppZustand {
     sitzung: Arc<anmeldung::Sitzung>,
     /// Loopback-Server für lokale Pakete (CS7).
     lokal: lokal::Lokal,
+    /// Zuletzt gefundenes Update (CS9), bis der Nutzer es installiert.
+    update: Mutex<Option<tauri_plugin_updater::Update>>,
 }
 
 fn konfig_ordner(app: &AppHandle) -> Result<PathBuf, Fehler> {
@@ -150,6 +153,27 @@ fn abmelden(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
         z.sitzung.abmelden(a)?;
     }
     Ok(anmelde_ansicht(&z, &k))
+}
+
+/// Fragt das Update-Manifest des Servers (`client_update`) ab.
+#[tauri::command]
+async fn update_pruefen(app: AppHandle, z: State<'_, AppZustand>) -> Result<aktualisierung::UpdateInfo, Fehler> {
+    let k = aktive_konfig(&z)?;
+    let (info, update) = aktualisierung::pruefen(&app, k.client_update.as_ref()).await?;
+    *z.update.lock().unwrap() = update;
+    Ok(info)
+}
+
+/// Lädt das gefundene Update (Signatur prüft das Plugin), installiert und
+/// startet neu.
+#[tauri::command]
+async fn update_installieren(app: AppHandle, z: State<'_, AppZustand>) -> Result<(), Fehler> {
+    let update = z.update.lock().unwrap().take().ok_or_else(|| Fehler::Eingabe("Kein Update gefunden.".into()))?;
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| Fehler::Netz(format!("Update nicht installiert: {e}")))?;
+    app.restart();
 }
 
 #[derive(Serialize)]
@@ -349,6 +373,7 @@ pub fn run() {
         .expect("HTTP-Client");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let einstellungen = konfig_ordner(app.handle()).map(|o| Einstellungen::lesen(&o)).unwrap_or_default();
             // Loopback-Server zuerst: sein Token steht im Initialisierungsskript
@@ -366,6 +391,7 @@ pub fn run() {
                 startseite: Mutex::new(None),
                 sitzung: Arc::new(anmeldung::Sitzung::neu(Arc::new(anmeldung::Schluesselbund))),
                 lokal,
+                update: Mutex::new(None),
             });
             if let Some(w) = app.get_webview_window("main") {
                 *app.state::<AppZustand>().startseite.lock().unwrap() = w.url().ok();
@@ -404,7 +430,9 @@ pub fn run() {
             oberflaeche_oeffnen,
             anmeldung_status,
             anmelden,
-            abmelden
+            abmelden,
+            update_pruefen,
+            update_installieren
         ])
         .run(tauri::generate_context!())
         .expect("LeadLab-Client konnte nicht starten");

@@ -27,8 +27,16 @@
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https: http:; connect-src ipc: http://ipc.localhost"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "PLATZHALTER-UPDATER-PUBKEY: mit `npm run tauri signer generate` erzeugen und den öffentlichen Schlüssel hier eintragen (README, Abschnitt Release)",
+      "endpoints": [],
+      "windows": { "installMode": "passive" }
+    }
+  },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": false,
     "targets": ["nsis", "msi", "appimage", "deb"],
     "category": "Utility",
     "shortDescription": "Arbeitsplatz-Client für Vanguard LeadLab",

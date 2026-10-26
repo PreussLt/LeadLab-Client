@@ -1,0 +1,110 @@
+# Release-Pakete des LeadLab-Clients (CS9, LeadLab-Hauptrepo #764).
+#
+# Ein Tag v<version> (gleich "version" in package.json) baut auf Windows NSIS
+# und MSI, auf Linux AppImage und deb, signiert die Update-Artefakte mit dem
+# Updater-Schlüssel und legt alles samt latest.json als Entwurf ins
+# GitHub-Release. Veröffentlicht wird von Hand (Entwurf → Release), damit kein
+# halbes Release an die Arbeitsplätze geht.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# Secrets (Repo → Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           Inhalt der privaten Schlüsseldatei
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  ihr Passwort (leer, wenn ohne)
+# Erzeugen einmalig lokal: npm run tauri signer generate -- -w ~/.tauri/leadlab-client.key
+# Den öffentlichen Teil (…key.pub) in src-tauri/tauri.conf.json unter
+# plugins.updater.pubkey eintragen und committen. Die private Datei gehört nie
+# ins Repo.
+#
+# Danach auf den Server: latest.json mit werkzeug/update-manifest.mjs auf die
+# Adresse des Servers umschreiben und mit den Installern nach
+# <daten-auslieferung>/client/ legen (README, Abschnitt Release).
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  pakete:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows (NSIS, MSI)
+            os: windows-latest
+            bundles: nsis,msi
+          - name: Linux (AppImage, deb)
+            os: ubuntu-22.04
+            bundles: appimage,deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag passt zur Version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} passt nicht zu package.json ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Signierschlüssel vorhanden
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "Secret TAURI_SIGNING_PRIVATE_KEY fehlt – ohne ihn gibt es keine signierten Updates." >&2
+            exit 1
+          fi
+          if grep -q PLATZHALTER src-tauri/tauri.conf.json; then
+            echo "plugins.updater.pubkey ist noch der Platzhalter – öffentlichen Schlüssel eintragen." >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Linux-Abhängigkeiten
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+            libdbus-1-dev pkg-config file patchelf
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Bauen, signieren, ins Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: LeadLab-Client ${{ github.ref_name }}
+          releaseBody: Pakete für Windows (NSIS, MSI) und Linux (AppImage, deb). Update-Manifest latest.json liegt bei.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          # Update-Artefakte (.sig) nur im Release: lokale Bauten brauchen keinen Schlüssel.
+          args: --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
