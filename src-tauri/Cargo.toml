@@ -25,6 +25,12 @@ futures-util = "0.3"
 sha2 = "0.10"
 hex = "0.4"
 fs2 = "0.4"
+# Anmeldung (CS4, #759): PKCE, Systembrowser, Refresh-Token im Schlüsselbund
+# des Betriebssystems (Windows Credential Manager, Secret Service unter Linux).
+base64 = "0.22"
+getrandom = "0.3"
+open = "5"
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
 tempfile = "3"

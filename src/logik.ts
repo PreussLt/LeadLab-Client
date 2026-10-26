@@ -15,6 +15,16 @@ export interface ClientKonfig {
   marke?: { landkreis?: string | null; logo?: string | null }
 }
 
+/** Braucht dieser Server eine Anmeldung, bevor der Katalog lädt (Konzept §8.2 Schritt 2)? */
+export function anmeldungNoetig(k: ClientKonfig | null): boolean {
+  return k?.daten.zugang === 'anmeldung'
+}
+
+/** Schritt nach „Server“: Anmeldung, wenn der Server sie verlangt, sonst gleich die Daten. */
+export function nachServer(k: ClientKonfig | null): 'anmeldung' | 'daten' {
+  return anmeldungNoetig(k) ? 'anmeldung' : 'daten'
+}
+
 /** Reihenfolge und Namen der Gruppen im Datenbaum. */
 export const GRUPPEN: { id: string; titel: string }[] = [
   { id: 'gelaende', titel: 'Gelände' },

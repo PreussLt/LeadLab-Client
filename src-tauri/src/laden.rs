@@ -26,6 +26,12 @@ use crate::katalog::{Datei, Plan};
 
 pub const STROEME: usize = 3;
 
+/// Liefert vor jeder Datei ein gültiges Access-Token (CS4, #759): Ein
+/// Access-Token lebt nur Minuten, ein Paket lädt länger. nginx prüft beim
+/// Beginn jeder Anfrage, ein laufender Strom bricht nicht ab.
+pub type TokenQuelle =
+    Arc<dyn Fn() -> futures_util::future::BoxFuture<'static, Result<Option<String>, Fehler>> + Send + Sync>;
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Fortschritt {
     pub pfad: String,
@@ -177,7 +183,7 @@ async fn versuch(
 pub async fn ausfuehren(
     client: reqwest::Client,
     basis: Vec<Url>,
-    token: Option<String>,
+    token: Option<TokenQuelle>,
     ablage: Arc<Ablage>,
     plan: Plan,
     auswahl: crate::katalog::Auswahl,
@@ -215,7 +221,14 @@ pub async fn ausfuehren(
                 let teilmeldung = move |geladen: u64| {
                     m(Fortschritt { pfad: p2.clone(), geladen, gesamt, stand: "laeuft", meldung: None })
                 };
-                let r = lade_datei(&client, &basis, token.as_deref(), &ablage, &datei, &abbruch, &teilmeldung).await;
+                let r = match &token {
+                    Some(q) => q().await,
+                    None => Ok(None),
+                };
+                let r = match r {
+                    Ok(t) => lade_datei(&client, &basis, t.as_deref(), &ablage, &datei, &abbruch, &teilmeldung).await,
+                    Err(e) => Err(e),
+                };
                 match &r {
                     Ok(()) => {
                         let mut z = zustand.lock().await;
@@ -425,5 +438,36 @@ mod tests {
         assert_eq!(z.katalog_erzeugt.as_deref(), Some("2026-10-26"));
         assert!(!d.path().join("alt.bin").exists());
         assert_eq!(meldungen.lock().unwrap().last(), Some(&"fertig"));
+    }
+
+    #[tokio::test]
+    async fn token_wird_je_datei_frisch_geholt() {
+        let i = inhalt();
+        let (basis, _) = server(i.clone(), true, None).await;
+        let d = tempfile::tempdir().unwrap();
+        let a = Arc::new(Ablage::neu(d.path()));
+        let f1 = datei(&i);
+        let f2 = Datei { pfad: "karte/zwei.pmtiles".into(), ..f1.clone() };
+        let plan = Plan { laden: vec![f1, f2], ..Default::default() };
+        let aufrufe = Arc::new(AtomicUsize::new(0));
+        let z = aufrufe.clone();
+        let quelle: TokenQuelle = Arc::new(move || {
+            let n = z.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(Some(format!("token-{n}"))) })
+        });
+        ausfuehren(reqwest::Client::new(), vec![basis.clone()], Some(quelle), a.clone(), plan.clone(), Default::default(),
+            None, Arc::new(AtomicBool::new(false)), Arc::new(|_| {}))
+            .await
+            .unwrap();
+        assert_eq!(aufrufe.load(Ordering::SeqCst), 2);
+
+        // Kann die Quelle kein Token liefern, scheitert die Datei mit ihrer Meldung.
+        let d2 = tempfile::tempdir().unwrap();
+        let fehlt: TokenQuelle = Arc::new(|| Box::pin(async { Err(Fehler::Server("Bitte neu anmelden.".into())) }));
+        let e = ausfuehren(reqwest::Client::new(), vec![basis], Some(fehlt), Arc::new(Ablage::neu(d2.path())), plan,
+            Default::default(), None, Arc::new(AtomicBool::new(false)), Arc::new(|_| {}))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("Bitte neu anmelden."));
     }
 }

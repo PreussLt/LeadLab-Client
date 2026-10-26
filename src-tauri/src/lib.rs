@@ -9,6 +9,7 @@
 //! geht es über das Fenstermenü („Daten verwalten“, „Server wechseln“).
 
 pub mod ablage;
+pub mod anmeldung;
 pub mod einstellungen;
 pub mod fehler;
 pub mod katalog;
@@ -41,6 +42,9 @@ struct AppZustand {
     laeuft: Arc<AtomicBool>,
     /// Adresse der lokalen Assistentenseite (für den Rückweg vom Server).
     startseite: Mutex<Option<Url>>,
+    /// Anmeldung für die Datenauslieferung (CS4): Access-Token im Speicher,
+    /// Refresh-Token im Schlüsselbund.
+    sitzung: Arc<anmeldung::Sitzung>,
 }
 
 fn konfig_ordner(app: &AppHandle) -> Result<PathBuf, Fehler> {
@@ -92,6 +96,58 @@ async fn konfig_pruefen(eingabe: String, z: State<'_, AppZustand>) -> Result<Cli
     Ok(k)
 }
 
+/// Token für Katalog und Pakete: bei `zugang = anmeldung` Pflicht.
+async fn daten_token(z: &AppZustand, k: &ClientKonfig) -> Result<Option<String>, Fehler> {
+    if k.daten.zugang != konfig::Zugang::Anmeldung {
+        return Ok(None);
+    }
+    let a = k.anmeldung.as_ref().ok_or_else(|| Fehler::Server("Der Server nennt keinen Anmeldedienst.".into()))?;
+    match z.sitzung.token(&z.client, a).await? {
+        Some(t) => Ok(Some(t)),
+        None => Err(Fehler::Eingabe("Für die Daten dieses Servers bitte zuerst anmelden.".into())),
+    }
+}
+
+#[derive(Serialize)]
+struct AnmeldeAnsicht {
+    /// Der Server verlangt eine Anmeldung für die Daten.
+    noetig: bool,
+    angemeldet: bool,
+}
+
+fn anmelde_ansicht(z: &AppZustand, k: &ClientKonfig) -> AnmeldeAnsicht {
+    let noetig = k.daten.zugang == konfig::Zugang::Anmeldung;
+    let angemeldet = k.anmeldung.as_ref().map(|a| z.sitzung.status(a).angemeldet).unwrap_or(false);
+    AnmeldeAnsicht { noetig, angemeldet }
+}
+
+#[tauri::command]
+fn anmeldung_status(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
+    let k = aktive_konfig(&z)?;
+    Ok(anmelde_ansicht(&z, &k))
+}
+
+/// Öffnet den Systembrowser zur Anmeldung und wartet auf den Rückruf.
+#[tauri::command]
+async fn anmelden(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
+    let k = aktive_konfig(&z)?;
+    let a = k.anmeldung.clone().ok_or_else(|| Fehler::Server("Der Server nennt keinen Anmeldedienst.".into()))?;
+    let oeffne = |u: &Url| -> Result<(), Fehler> {
+        open::that_detached(u.as_str()).map_err(|e| Fehler::Eingabe(format!("Browser lässt sich nicht öffnen ({e}).")))
+    };
+    z.sitzung.anmelden(&z.client, &a, &oeffne, anmeldung::FRIST).await?;
+    Ok(anmelde_ansicht(&z, &k))
+}
+
+#[tauri::command]
+fn abmelden(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
+    let k = aktive_konfig(&z)?;
+    if let Some(a) = &k.anmeldung {
+        z.sitzung.abmelden(a)?;
+    }
+    Ok(anmelde_ansicht(&z, &k))
+}
+
 #[derive(Serialize)]
 struct KatalogAnsicht {
     katalog: Katalog,
@@ -103,9 +159,8 @@ struct KatalogAnsicht {
 #[tauri::command]
 async fn katalog_laden(ordner: PathBuf, z: State<'_, AppZustand>) -> Result<KatalogAnsicht, Fehler> {
     let k = aktive_konfig(&z)?;
-    // Token folgt mit CS4 (Anmeldung); bis dahin nur Server mit zugang=offen
-    // oder ohne Zugangsprüfung.
-    let kat = katalog::lade(&z.client, &k.daten.katalog, None).await?;
+    let token = daten_token(&z, &k).await?;
+    let kat = katalog::lade(&z.client, &k.daten.katalog, token.as_deref()).await?;
     *z.katalog.lock().unwrap() = Some(kat.clone());
     let a = Ablage::neu(&ordner);
     Ok(KatalogAnsicht { katalog: kat, auswahl: a.zustand_lesen().auswahl, vorhanden: a.vorhanden() })
@@ -144,6 +199,24 @@ fn laden_starten(app: AppHandle, auswahl: Auswahl, ordner: PathBuf, z: State<'_,
     };
     let ablage = Arc::new(Ablage::neu(&ordner));
     let plan = katalog::plan(&kat, &auswahl, &ablage.vorhanden());
+    // Vor jeder Datei ein frisches Token (Access-Token leben Minuten).
+    let token: Option<laden::TokenQuelle> = match aktive_konfig(&z) {
+        Ok(k) if k.daten.zugang == konfig::Zugang::Anmeldung => {
+            let (client, sitzung) = (z.client.clone(), z.sitzung.clone());
+            let a = k.anmeldung.clone();
+            Some(Arc::new(move || {
+                let (client, sitzung, a) = (client.clone(), sitzung.clone(), a.clone());
+                Box::pin(async move {
+                    let a = a.ok_or_else(|| Fehler::Server("Der Server nennt keinen Anmeldedienst.".into()))?;
+                    match sitzung.token(&client, &a).await? {
+                        Some(t) => Ok(Some(t)),
+                        None => Err(Fehler::Eingabe("Anmeldung abgelaufen. Bitte neu anmelden.".into())),
+                    }
+                })
+            }))
+        }
+        _ => None,
+    };
     z.abbruch.store(false, Ordering::SeqCst);
     let (client, abbruch, laeuft) = (z.client.clone(), z.abbruch.clone(), z.laeuft.clone());
     let melder = app.clone();
@@ -151,7 +224,7 @@ fn laden_starten(app: AppHandle, auswahl: Auswahl, ordner: PathBuf, z: State<'_,
         let melde = Arc::new(move |f: laden::Fortschritt| {
             let _ = melder.emit("laden-fortschritt", f);
         });
-        let r = laden::ausfuehren(client, kat.basis.clone(), None, ablage, plan, auswahl, kat.erzeugt.clone(), abbruch, melde)
+        let r = laden::ausfuehren(client, kat.basis.clone(), token, ablage, plan, auswahl, kat.erzeugt.clone(), abbruch, melde)
             .await;
         laeuft.store(false, Ordering::SeqCst);
         let ende = match r {
@@ -254,6 +327,7 @@ pub fn run() {
                 abbruch: Arc::new(AtomicBool::new(false)),
                 laeuft: Arc::new(AtomicBool::new(false)),
                 startseite: Mutex::new(None),
+                sitzung: Arc::new(anmeldung::Sitzung::neu(Arc::new(anmeldung::Schluesselbund))),
             });
             if let Some(w) = app.get_webview_window("main") {
                 *app.state::<AppZustand>().startseite.lock().unwrap() = w.url().ok();
@@ -289,7 +363,10 @@ pub fn run() {
             laden_abbrechen,
             freier_speicher,
             einrichtung_speichern,
-            oberflaeche_oeffnen
+            oberflaeche_oeffnen,
+            anmeldung_status,
+            anmelden,
+            abmelden
         ])
         .run(tauri::generate_context!())
         .expect("LeadLab-Client konnte nicht starten");

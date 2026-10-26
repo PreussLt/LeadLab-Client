@@ -1,6 +1,6 @@
 //! Einstellungen des Clients (eine JSON-Datei im Konfigurationsordner des
-//! Benutzers). Geheimnisse stehen hier nie — das Token kommt mit CS4 in den
-//! Schlüsselbund des Betriebssystems.
+//! Benutzers). Geheimnisse stehen hier nie — das Refresh-Token der
+//! Anmeldung liegt im Schlüsselbund des Betriebssystems (anmeldung.rs).
 
 use std::path::{Path, PathBuf};
 

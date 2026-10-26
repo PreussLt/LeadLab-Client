@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import katalogJson from '../../schema/beispiel-katalog.json'
 import konfigJson from '../../schema/beispiel-leadlab-client.json'
-import { type ClientKonfig, type Katalog, aufgeloest, baum, gesamt, gesperrt, groesse, umschalten, vorauswahl } from '../logik'
+import { type ClientKonfig, type Katalog, anmeldungNoetig, aufgeloest, baum, gesamt, gesperrt, groesse, nachServer, umschalten, vorauswahl } from '../logik'
 
 const k = katalogJson as unknown as Katalog
 const konfig = konfigJson as unknown as ClientKonfig
@@ -63,5 +63,19 @@ describe('gesamt', () => {
     const m = new Map([['a', { geladen: 50, gesamt: 100 }], ['b', { geladen: 0, gesamt: 100 }]])
     expect(gesamt(m)).toEqual({ geladen: 50, gesamt: 200, anteil: 0.25 })
     expect(gesamt(new Map()).anteil).toBe(0)
+  })
+})
+
+describe('Anmeldung (CS4)', () => {
+  const k = konfigJson as unknown as ClientKonfig
+  it('verlangt sie bei zugang=anmeldung', () => {
+    expect(anmeldungNoetig(k)).toBe(true)
+    expect(nachServer(k)).toBe('anmeldung')
+  })
+  it('überspringt sie bei zugang=offen und ohne Server', () => {
+    const offen = { ...k, daten: { ...k.daten, zugang: 'offen' as const } }
+    expect(anmeldungNoetig(offen)).toBe(false)
+    expect(nachServer(offen)).toBe('daten')
+    expect(nachServer(null)).toBe('daten')
   })
 })

@@ -8,7 +8,7 @@
   "anmeldung": {
     "issuer": "https://auth.leadlab.example.de/realms/leadlab",
     "client_id": "leadlab-client",
-    "scopes": ["openid", "leadlab-daten"]
+    "scopes": ["openid"]
   },
   "daten": {
     "katalog": "https://leadlab.example.de/daten/katalog.json",

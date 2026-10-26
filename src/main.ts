@@ -1,6 +1,7 @@
 // Einrichtungsassistent des LeadLab-Clients (Konzept §8.2).
 //
-// Schritte: Server → Daten → Speicherort → Download → Fertig. Der Rust-Kern
+// Schritte: Server → Anmeldung (nur bei zugang=anmeldung) → Daten →
+// Speicherort → Download → Fertig. Der Rust-Kern
 // macht alles mit Netz und Platte; diese Seite zeigt nur an und sammelt die
 // Auswahl. Einstieg über das Fenstermenü: #server bzw. #daten.
 
@@ -9,10 +10,10 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import {
   type Auswahl, type ClientKonfig, type Katalog,
-  aufgeloest, baum, gesamt, gesperrt, groesse, paketBytes, umschalten, vorauswahl,
+  anmeldungNoetig, aufgeloest, baum, gesamt, gesperrt, groesse, nachServer, paketBytes, umschalten, vorauswahl,
 } from './logik'
 
-type Schritt = 'start' | 'server' | 'daten' | 'ort' | 'laden' | 'fertig'
+type Schritt = 'start' | 'server' | 'anmeldung' | 'daten' | 'ort' | 'laden' | 'fertig'
 
 interface StartInfo {
   einstellungen: { konfig_adresse?: string | null; konfig?: ClientKonfig | null; datenordner?: string | null; eingerichtet: boolean }
@@ -38,10 +39,13 @@ const z = {
   beschaeftigt: false,
   fehler: '' as string,
   hinweis: '' as string,
+  /** Anmeldung für die Daten (CS4): null = noch nicht abgefragt. */
+  anmeldung: null as { noetig: boolean; angemeldet: boolean } | null,
 }
 
 const SCHRITTE: { id: Schritt; titel: string }[] = [
   { id: 'server', titel: 'Server' },
+  { id: 'anmeldung', titel: 'Anmeldung' },
   { id: 'daten', titel: 'Daten' },
   { id: 'ort', titel: 'Speicherort' },
   { id: 'laden', titel: 'Download' },
@@ -71,7 +75,39 @@ async function schritt(s: Schritt) {
   z.schritt = s
   z.fehler = ''
   zeichne()
+  if (s === 'anmeldung') await anmeldungAbfragen()
   if (s === 'daten' && !z.katalog) await katalogLaden()
+}
+
+async function anmeldungAbfragen() {
+  try {
+    z.anmeldung = await invoke<{ noetig: boolean; angemeldet: boolean }>('anmeldung_status')
+  } catch (e) {
+    z.fehler = fehlerText(e)
+  }
+  zeichne()
+}
+
+async function anmelden() {
+  z.beschaeftigt = true; z.fehler = ''; zeichne()
+  try {
+    z.anmeldung = await invoke<{ noetig: boolean; angemeldet: boolean }>('anmelden')
+    z.katalog = null
+  } catch (e) {
+    z.fehler = fehlerText(e)
+  } finally {
+    z.beschaeftigt = false; zeichne()
+  }
+}
+
+async function abmelden() {
+  try {
+    z.anmeldung = await invoke<{ noetig: boolean; angemeldet: boolean }>('abmelden')
+    z.katalog = null
+  } catch (e) {
+    z.fehler = fehlerText(e)
+  }
+  zeichne()
 }
 
 // ── Aktionen ───────────────────────────────────────────────────────────────
@@ -225,7 +261,32 @@ function ansichtServer(): HTMLElement {
         h('dt', {}, 'Datenzugang'), h('dd', {}, k.daten.zugang === 'offen' ? 'offen' : 'mit Anmeldung'),
       )),
     h('div', { class: 'knoepfe' },
-      h('button', { class: 'primaer', disabled: !k, onclick: () => schritt('daten') }, 'Weiter'),
+      h('button', { class: 'primaer', disabled: !k, onclick: () => schritt(nachServer(k)) }, 'Weiter'),
+    ),
+  )
+}
+
+function ansichtAnmeldung(): HTMLElement {
+  const a = z.anmeldung
+  return h('section', { class: 'inhalt' },
+    h('h1', {}, 'Anmelden für die Daten'),
+    h('p', { class: 'einleitung' },
+      'Dieser Server gibt seine Datenpakete nur nach einer Anmeldung heraus. Der Knopf öffnet die Anmeldeseite im Browser; danach geht es hier weiter. ',
+      'Die Anmeldung gilt nur für die Daten — in LeadLab selbst melden Sie sich wie gewohnt an.'),
+    h('div', { class: 'panel' },
+      a?.angemeldet
+        ? h('p', { class: 'meldung ok' }, 'Angemeldet. Die Anmeldung bleibt im Schlüsselbund dieses Rechners gespeichert.')
+        : z.beschaeftigt
+          ? h('p', {}, h('span', { class: 'dreht', 'aria-hidden': 'true' }), ' Warte auf die Anmeldung im Browser …')
+          : h('p', { class: 'nebentext' }, 'Noch nicht angemeldet.'),
+    ),
+    fehlerFeld(),
+    h('div', { class: 'knoepfe' },
+      h('button', { class: 'sekundaer links', onclick: () => schritt('server') }, 'Zurück'),
+      a?.angemeldet
+        ? h('button', { class: 'sekundaer', onclick: abmelden }, 'Abmelden')
+        : h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: anmelden }, 'Im Browser anmelden'),
+      h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: () => schritt('daten') }, 'Weiter'),
     ),
   )
 }
@@ -238,7 +299,7 @@ function ansichtDaten(): HTMLElement {
       z.beschaeftigt ? h('p', {}, h('span', { class: 'dreht', 'aria-hidden': 'true' }), ' Datenkatalog wird geladen') : null,
       fehlerFeld(),
       !z.beschaeftigt && h('div', { class: 'knoepfe' },
-        h('button', { class: 'sekundaer links', onclick: () => schritt('server') }, 'Zurück'),
+        h('button', { class: 'sekundaer links', onclick: () => schritt(anmeldungNoetig(z.konfig) ? 'anmeldung' : 'server') }, 'Zurück'),
         h('button', { class: 'sekundaer', onclick: ohneDatenWeiter }, 'Ohne lokale Daten weiter'),
         h('button', { class: 'primaer', onclick: katalogLaden }, 'Erneut versuchen'),
       ))
@@ -282,7 +343,7 @@ function ansichtDaten(): HTMLElement {
     summe(),
     fehlerFeld(),
     h('div', { class: 'knoepfe' },
-      h('button', { class: 'sekundaer links', onclick: () => schritt('server') }, 'Zurück'),
+      h('button', { class: 'sekundaer links', onclick: () => schritt(anmeldungNoetig(z.konfig) ? 'anmeldung' : 'server') }, 'Zurück'),
       h('button', { class: 'primaer', onclick: () => schritt('ort') }, 'Weiter'),
     ),
   )
@@ -372,7 +433,7 @@ function ansichtFertig(): HTMLElement {
 function zeichne() {
   const app = document.getElementById('app')!
   const ansicht = {
-    start: ansichtStart, server: ansichtServer, daten: ansichtDaten,
+    start: ansichtStart, server: ansichtServer, anmeldung: ansichtAnmeldung, daten: ansichtDaten,
     ort: ansichtOrt, laden: ansichtLaden, fertig: ansichtFertig,
   }[z.schritt]()
   app.replaceChildren(leiste(), ansicht)

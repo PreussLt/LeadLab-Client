@@ -17,16 +17,24 @@ dieses Grundgerüst ist CS1 #756). Dort ist dieses Repo als Submodul
    `https://<adresse>/.well-known/leadlab-client.json` (oder direkt eine
    angegebene `.json`) und zeigt Name, Landkreis, Version und Datenzugang.
    `http://` gilt nur für `localhost`, `lead.lab` und private Adressen.
-2. **Daten:** Der Baum zeigt Region › Gruppe (Gelände, Karte, Luftbild,
+2. **Anmeldung** (nur wenn der Server `zugang: anmeldung` meldet): Der Knopf
+   öffnet den Systembrowser auf die Keycloak-Anmeldung des Servers
+   (öffentlicher Client `leadlab-client`, Authorization Code + PKCE S256), der
+   Client wartet auf `http://127.0.0.1:<zufallsport>/rueckruf` (RFC 8252). Das
+   Refresh-Token liegt im Schlüsselbund des Betriebssystems (Windows
+   Credential Manager, Secret Service unter Linux), das Access-Token nur im
+   Speicher; vor jeder Datei holt der Downloader ein frisches. Das Token
+   öffnet nur `/daten/` des Servers, nicht die Übung.
+3. **Daten:** Der Baum zeigt Region › Gruppe (Gelände, Karte, Luftbild,
    3D-Gebäude, Stammdaten) › Paket, jeweils mit Größe und Lizenz. Grundpakete
    einer gewählten Region sind gesetzt, Abhängigkeiten werden mitgenommen.
-3. **Speicherort:** Vorgabe ist `%LOCALAPPDATA%\de.leadlab.client\daten`
+4. **Speicherort:** Vorgabe ist `%LOCALAPPDATA%\de.leadlab.client\daten`
    bzw. `~/.local/share/de.leadlab.client/daten`. Angezeigt wird der freie
    Platz am Speicherort.
-4. **Download:** höchstens drei Ströme, Wiederaufnahme per HTTP-Range,
+5. **Download:** höchstens drei Ströme, Wiederaufnahme per HTTP-Range,
    SHA-256-Prüfung jeder Datei, Spiegel-Rückfall. Abbruch und Neustart
    verlieren nichts.
-5. **Fertig:** Das Fenster wechselt zur Oberfläche des Servers.
+6. **Fertig:** Das Fenster wechselt zur Oberfläche des Servers.
 
 Nach der Einrichtung öffnet der Client den Server direkt. Das Menü
 **LeadLab** bietet *Daten verwalten*, *Server wechseln*, *Neu laden* (F5) und
@@ -73,6 +81,7 @@ docker run --rm -v "$PWD:/c" -v leadlab-client-cargo:/usr/local/cargo/registry \
 | `src-tauri/src/katalog.rs` | Katalog, Auswahl auflösen, Plan gegen die Ablage |
 | `src-tauri/src/ablage.rs` | Datenordner, sichere Pfade, Zustand, freier Speicher |
 | `src-tauri/src/laden.rs` | Downloader mit Range, SHA-256 und Spiegeln |
+| `src-tauri/src/anmeldung.rs` | OIDC PKCE mit Loopback-Rückruf, Token im Schlüsselbund |
 | `src-tauri/src/lib.rs` | Tauri-Befehle, Menü, Navigation zur Server-Oberfläche |
 
 **Sicherheit:** IPC-Rechte hat nur die lokale Assistentenseite
@@ -82,7 +91,5 @@ Datenordners schreiben (`ablage::sicherer_pfad`).
 
 ## Offen (Folgepakete im Hauptrepo)
 
-- **CS4 #759** Anmeldung (OIDC PKCE, Token im Schlüsselbund). Bis dahin lädt der
-  Client Kataloge nur von Servern ohne Zugangsprüfung.
 - **CS7 #762** Loopback-Server, der lokale Pakete an die Oberfläche liefert.
 - **CS9 #764** Release-CI und Auto-Update.
