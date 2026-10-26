@@ -36,7 +36,23 @@ dieses Grundgerüst ist CS1 #756). Dort ist dieses Repo als Submodul
    verlieren nichts.
 6. **Fertig:** Das Fenster wechselt zur Oberfläche des Servers.
 
-Nach der Einrichtung öffnet der Client den Server direkt. Das Menü
+Nach der Einrichtung öffnet der Client den Server direkt.
+
+## Lokale Pakete in der Oberfläche
+
+Der Client startet einen **Loopback-Server** auf `127.0.0.1:<zufallsport>`,
+erreichbar nur unter einem zufälligen Pfad-Token (`/t/<token>/…`, je Start
+neu). Er liest die geladenen Pakete per Dateizugriff:
+`/kacheln/osm/{z}/{x}/{y}.png`, `/kacheln/dop/{z}/{x}/{y}.jpg`,
+`/gelaende/{z}/{x}/{y}.png` (Terrarium) aus den PMTiles, und
+`/lod2/gebaeude?lat_min=…` aus den LoD2-Manifesten (Antwort wie
+`GET /api/lod2/gebaeude` des Servers). Was fehlt, ist 404 — dann fragt die
+Oberfläche den Server. `/status` nennt die vorhandenen Pakete.
+
+In jede Seite außer der Assistentenseite spritzt der Client
+`window.__LEADLAB_CLIENT__ = { version, lokal, pakete }` ein (eingefroren).
+Die Frontend-Weiche der Oberfläche liest daraus die lokale Adresse
+(Hauptrepo CS8 #763). IPC-Rechte bekommt die entfernte Seite weiterhin nicht. Das Menü
 **LeadLab** bietet *Daten verwalten*, *Server wechseln*, *Neu laden* (F5) und
 *Vollbild* (F11).
 
@@ -82,6 +98,8 @@ docker run --rm -v "$PWD:/c" -v leadlab-client-cargo:/usr/local/cargo/registry \
 | `src-tauri/src/ablage.rs` | Datenordner, sichere Pfade, Zustand, freier Speicher |
 | `src-tauri/src/laden.rs` | Downloader mit Range, SHA-256 und Spiegeln |
 | `src-tauri/src/anmeldung.rs` | OIDC PKCE mit Loopback-Rückruf, Token im Schlüsselbund |
+| `src-tauri/src/lokal.rs` | Loopback-Server für lokale Pakete, Initialisierungsskript |
+| `src-tauri/src/pmtiles.rs` | PMTiles v3 lesen (Hilbert-Ids, Blattverzeichnisse) |
 | `src-tauri/src/lib.rs` | Tauri-Befehle, Menü, Navigation zur Server-Oberfläche |
 
 **Sicherheit:** IPC-Rechte hat nur die lokale Assistentenseite
@@ -91,5 +109,4 @@ Datenordners schreiben (`ablage::sicherer_pfad`).
 
 ## Offen (Folgepakete im Hauptrepo)
 
-- **CS7 #762** Loopback-Server, der lokale Pakete an die Oberfläche liefert.
 - **CS9 #764** Release-CI und Auto-Update.

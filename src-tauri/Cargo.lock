@@ -2065,6 +2065,7 @@ name = "leadlab-client"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "flate2",
  "fs2",
  "futures-util",
  "getrandom 0.3.4",

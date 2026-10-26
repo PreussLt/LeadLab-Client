@@ -30,6 +30,8 @@ fs2 = "0.4"
 base64 = "0.22"
 getrandom = "0.3"
 open = "5"
+# Loopback-Server (CS7, #762): PMTiles-Verzeichnisse und LoD2-Manifeste sind gzip.
+flate2 = "1"
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]

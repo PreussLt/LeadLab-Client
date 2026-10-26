@@ -15,6 +15,8 @@ pub mod fehler;
 pub mod katalog;
 pub mod konfig;
 pub mod laden;
+pub mod lokal;
+pub mod pmtiles;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -45,6 +47,8 @@ struct AppZustand {
     /// Anmeldung für die Datenauslieferung (CS4): Access-Token im Speicher,
     /// Refresh-Token im Schlüsselbund.
     sitzung: Arc<anmeldung::Sitzung>,
+    /// Loopback-Server für lokale Pakete (CS7).
+    lokal: lokal::Lokal,
 }
 
 fn konfig_ordner(app: &AppHandle) -> Result<PathBuf, Fehler> {
@@ -257,6 +261,7 @@ fn einrichtung_speichern(app: AppHandle, ordner: PathBuf, z: State<'_, AppZustan
     if e.konfig.is_none() {
         return Err(Fehler::Eingabe("Noch kein Server geprüft.".into()));
     }
+    z.lokal.ordner_setzen(ordner.clone());
     e.datenordner = Some(ordner);
     e.eingerichtet = true;
     e.schreiben(&konfig_ordner(&app)?)
@@ -291,6 +296,33 @@ fn zurueck_zum_assistenten(app: &AppHandle, schritt: &str) {
     }
 }
 
+/// Hauptfenster aus tauri.conf.json (dort `create: false`), mit dem
+/// Initialisierungsskript `window.__LEADLAB_CLIENT__` für die
+/// Server-Oberfläche. Die lokale Assistentenseite bleibt ausgenommen; IPC hat
+/// die entfernte Seite ohnehin nicht (capabilities ohne `remote`).
+fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
+    let cfg = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .cloned()
+        .ok_or_else(|| tauri::Error::WindowNotFound)?;
+    let mut ausgenommen = vec![
+        "tauri://localhost".to_string(),
+        "http://tauri.localhost".to_string(),
+        "https://tauri.localhost".to_string(),
+    ];
+    if let Some(dev) = &app.config().build.dev_url {
+        ausgenommen.push(dev.origin().ascii_serialization());
+    }
+    tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
+        .initialization_script(&lokal::initialisierung(lokal, &ausgenommen))
+        .build()?;
+    Ok(())
+}
+
 fn menue(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let daten = MenuItem::with_id(app, "daten", "Daten verwalten …", true, None::<&str>)?;
     let server = MenuItem::with_id(app, "server", "Server wechseln …", true, None::<&str>)?;
@@ -319,6 +351,11 @@ pub fn run() {
     tauri::Builder::default()
         .setup(move |app| {
             let einstellungen = konfig_ordner(app.handle()).map(|o| Einstellungen::lesen(&o)).unwrap_or_default();
+            // Loopback-Server zuerst: sein Token steht im Initialisierungsskript
+            // des Hauptfensters (Konzept §8.3).
+            let ordner = einstellungen.datenordner.clone().unwrap_or_else(|| standard_datenordner(app.handle()));
+            let lokal = tauri::async_runtime::block_on(lokal::Lokal::starten(ordner))?;
+            hauptfenster(app, &lokal)?;
             app.manage(AppZustand {
                 client: client.clone(),
                 einstellungen: Mutex::new(einstellungen),
@@ -328,6 +365,7 @@ pub fn run() {
                 laeuft: Arc::new(AtomicBool::new(false)),
                 startseite: Mutex::new(None),
                 sitzung: Arc::new(anmeldung::Sitzung::neu(Arc::new(anmeldung::Schluesselbund))),
+                lokal,
             });
             if let Some(w) = app.get_webview_window("main") {
                 *app.state::<AppZustand>().startseite.lock().unwrap() = w.url().ok();
