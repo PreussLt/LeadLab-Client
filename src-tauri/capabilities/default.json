@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "assistent",
+  "description": "Nur die lokale Assistentenseite darf Befehle aufrufen. Die Server-Oberfläche (entfernte Adresse) bekommt keine Rechte.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

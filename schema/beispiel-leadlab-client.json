@@ -1,0 +1,22 @@
+{
+  "schema": "leadlab-client/1",
+  "name": "LeadLab Landkreis Sigmaringen",
+  "server_version": "0.4.643",
+  "min_client_version": "0.1.0",
+  "oberflaeche": "https://uebung.leadlab.example.de",
+  "startzentrale": "https://leadlab.example.de",
+  "anmeldung": {
+    "issuer": "https://auth.leadlab.example.de/realms/leadlab",
+    "client_id": "leadlab-client",
+    "scopes": ["openid", "leadlab-daten"]
+  },
+  "daten": {
+    "katalog": "https://leadlab.example.de/daten/katalog.json",
+    "zugang": "anmeldung"
+  },
+  "client_update": "https://leadlab.example.de/daten/client/update.json",
+  "marke": {
+    "landkreis": "Sigmaringen",
+    "logo": "https://leadlab.example.de/landkreis/logo.png"
+  }
+}

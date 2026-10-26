@@ -1,0 +1,37 @@
+# Tests und Kompilierprobe auf Linux und Windows bei jedem Push.
+# Release-Pakete (NSIS/MSI, AppImage/deb) und Updater folgen mit CS9
+# (LeadLab-Hauptrepo #764).
+name: Prüfen
+on:
+  push:
+  pull_request:
+
+jobs:
+  pruefen:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Linux-Abhängigkeiten
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Rust-Tests
+        working-directory: src-tauri
+        run: cargo test

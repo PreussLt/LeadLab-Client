@@ -1,0 +1,97 @@
+{
+  "schema": "leadlab-daten/1",
+  "erzeugt": "2026-10-26T20:00:00Z",
+  "basis": ["https://leadlab.example.de/daten/blobs/"],
+  "regionen": [
+    { "id": "lk_sigmaringen", "name": "Landkreis Sigmaringen", "bbox": [8.96, 47.89, 9.56, 48.24] },
+    { "id": "lk_rottweil", "name": "Landkreis Rottweil", "bbox": [8.38, 48.06, 8.86, 48.34] }
+  ],
+  "pakete": [
+    {
+      "id": "karte-osm.lk_sigmaringen.z5-14",
+      "gruppe": "karte",
+      "titel": "Straßenkarte Übersicht (z5–14)",
+      "region": "lk_sigmaringen",
+      "version": "2026-10-20",
+      "pflicht": true,
+      "lizenz": "© OpenStreetMap-Mitwirkende, ODbL",
+      "dateien": [
+        { "pfad": "karte/osm/lk_sigmaringen/z5-14.pmtiles", "bytes": 48213004,
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111" }
+      ],
+      "braucht": []
+    },
+    {
+      "id": "karte-osm.lk_sigmaringen.z15-17",
+      "gruppe": "karte",
+      "titel": "Straßenkarte Detail (z15–17)",
+      "region": "lk_sigmaringen",
+      "version": "2026-10-20",
+      "pflicht": false,
+      "lizenz": "© OpenStreetMap-Mitwirkende, ODbL",
+      "dateien": [
+        { "pfad": "karte/osm/lk_sigmaringen/z15-17.pmtiles", "bytes": 1213000000,
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222" }
+      ],
+      "braucht": ["karte-osm.lk_sigmaringen.z5-14"]
+    },
+    {
+      "id": "gelaende-dgm.lk_sigmaringen",
+      "gruppe": "gelaende",
+      "titel": "Geländemodell (DGM, z8–14)",
+      "region": "lk_sigmaringen",
+      "version": "2026-10-20",
+      "pflicht": true,
+      "lizenz": "Copernicus DEM GLO-30, © DLR e.V. 2010–2014 und © Airbus Defence and Space GmbH 2014–2018",
+      "dateien": [
+        { "pfad": "gelaende/dgm/lk_sigmaringen.pmtiles", "bytes": 152000000,
+          "sha256": "3333333333333333333333333333333333333333333333333333333333333333" }
+      ],
+      "braucht": []
+    },
+    {
+      "id": "luftbild-dop.lk_sigmaringen.z10-16",
+      "gruppe": "luftbild",
+      "titel": "Luftbild DOP20 Übersicht (z10–16)",
+      "region": "lk_sigmaringen",
+      "version": "2026-09-01",
+      "pflicht": false,
+      "lizenz": "© LGL BW, dl-de/by-2-0",
+      "dateien": [
+        { "pfad": "luftbild/dop/lk_sigmaringen/z10-16.pmtiles", "bytes": 1530000000,
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444" }
+      ],
+      "braucht": []
+    },
+    {
+      "id": "gebaeude-lod2.lk_sigmaringen",
+      "gruppe": "gebaeude",
+      "titel": "3D-Gebäude LoD2",
+      "region": "lk_sigmaringen",
+      "version": "2026-08-14",
+      "pflicht": false,
+      "lizenz": "© LGL BW, dl-de/by-2-0",
+      "dateien": [
+        { "pfad": "gebaeude/lod2/lk_sigmaringen/index.json", "bytes": 81000,
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555" },
+        { "pfad": "gebaeude/lod2/lk_sigmaringen/kacheln.tar", "bytes": 25000000,
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666" }
+      ],
+      "braucht": []
+    },
+    {
+      "id": "gelaende-dgm.lk_rottweil",
+      "gruppe": "gelaende",
+      "titel": "Geländemodell (DGM, z8–14)",
+      "region": "lk_rottweil",
+      "version": "2026-10-20",
+      "pflicht": false,
+      "lizenz": "Copernicus DEM GLO-30",
+      "dateien": [
+        { "pfad": "gelaende/dgm/lk_rottweil.pmtiles", "bytes": 98000000,
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777" }
+      ],
+      "braucht": []
+    }
+  ]
+}

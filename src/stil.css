@@ -1,0 +1,171 @@
+/*
+ * Stil des Assistenten. Werte aus dem LeadLab-Hauptrepo übernommen:
+ * Farb-Tokens aus apps/gemeinsam/src/basis.css (Kanal-Tripel, dunkel als
+ * Vorgabe, hell über prefers-color-scheme), ffw-rot #CC0000 als Primärfarbe,
+ * Jost für Text, IBM Plex Mono nur für codierte Werte (Adressen, Größen,
+ * Versionen). Schriften lokal gebündelt — der Client lädt nichts aus dem Netz.
+ */
+@import '@fontsource/jost/400.css';
+@import '@fontsource/jost/500.css';
+@import '@fontsource/jost/600.css';
+@import '@fontsource/jost/700.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+
+:root {
+  --farbe-flaeche: 3 7 18;
+  --farbe-panel: 17 24 39;
+  --farbe-stufe: 31 41 55;
+  --farbe-stufe-stark: 55 65 81;
+  --farbe-rand: 31 41 55;
+  --farbe-rand-stark: 55 65 81;
+  --farbe-rand-betont: 75 85 99;
+  --farbe-titel: 243 244 246;
+  --farbe-text: 229 231 235;
+  --farbe-nebentext: 156 163 175;
+  --farbe-fokus: 156 163 175;
+  --farbe-feld: 3 7 18;
+  --ffw-rot: #cc0000;
+  --kritisch: 248 113 113; /* red-400 */
+  --erledigt: 74 222 128;  /* green-400 */
+  --faellig: 250 204 21;   /* yellow-400 */
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --farbe-flaeche: 249 250 251;
+    --farbe-panel: 255 255 255;
+    --farbe-stufe: 243 244 246;
+    --farbe-stufe-stark: 229 231 235;
+    --farbe-rand: 209 213 219;
+    --farbe-rand-stark: 156 163 175;
+    --farbe-rand-betont: 107 114 128;
+    --farbe-titel: 17 24 39;
+    --farbe-text: 31 41 55;
+    --farbe-nebentext: 75 85 99;
+    --farbe-fokus: 75 85 99;
+    --farbe-feld: 255 255 255;
+    --kritisch: 185 28 28;  /* red-700 */
+    --erledigt: 21 128 61;  /* green-700 */
+    --faellig: 161 98 7;    /* yellow-700 */
+    color-scheme: light;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: rgb(var(--farbe-flaeche));
+  color: rgb(var(--farbe-text));
+  font-family: 'Jost', system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
+@media (prefers-reduced-motion: reduce) {
+  *:not(.dreht) { animation: none !important; transition: none !important; }
+}
+
+.mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.nebentext { color: rgb(var(--farbe-nebentext)); }
+.kritisch { color: rgb(var(--kritisch)); }
+.erledigt { color: rgb(var(--erledigt)); }
+
+#app { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+
+/* ── Schrittleiste ──────────────────────────────────────────────── */
+.leiste {
+  background: rgb(var(--farbe-panel));
+  border-right: 1px solid rgb(var(--farbe-rand));
+  padding: 28px 20px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.marke { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+.marke img { width: 40px; height: 40px; }
+.marke strong { color: rgb(var(--farbe-titel)); font-size: 20px; font-weight: 700; letter-spacing: .02em; }
+.schritt {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 44px; padding: 0 12px; border-radius: 8px;
+  color: rgb(var(--farbe-nebentext));
+}
+.schritt .nr {
+  width: 26px; height: 26px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 14px; font-weight: 600;
+  border: 2px solid rgb(var(--farbe-rand-stark));
+}
+.schritt.aktiv { background: rgb(var(--farbe-stufe)); color: rgb(var(--farbe-titel)); }
+.schritt.aktiv .nr { border-color: var(--ffw-rot); background: var(--ffw-rot); color: #fff; }
+.schritt.erledigt .nr { border-color: rgb(var(--erledigt)); color: rgb(var(--erledigt)); }
+.leiste .fuss { margin-top: auto; font-size: 13px; }
+
+/* ── Inhalt ─────────────────────────────────────────────────────── */
+.inhalt { padding: 40px 48px; max-width: 920px; display: flex; flex-direction: column; gap: 24px; }
+h1 { margin: 0; color: rgb(var(--farbe-titel)); font-size: 28px; font-weight: 600; }
+.einleitung { margin: 0; color: rgb(var(--farbe-nebentext)); max-width: 62ch; }
+.panel {
+  background: rgb(var(--farbe-panel));
+  border: 1px solid rgb(var(--farbe-rand));
+  border-radius: 12px; padding: 20px;
+}
+label.feldname { display: block; font-weight: 500; color: rgb(var(--farbe-titel)); margin-bottom: 8px; }
+.zeile { display: flex; gap: 12px; align-items: stretch; }
+input[type='text'] {
+  flex: 1; min-height: 48px; padding: 0 14px; font: inherit;
+  background: rgb(var(--farbe-feld)); color: rgb(var(--farbe-titel));
+  border: 1px solid rgb(var(--farbe-rand-stark)); border-radius: 8px;
+}
+input[type='text']:hover { border-color: rgb(var(--farbe-rand-betont)); }
+:focus-visible { outline: 2px solid rgb(var(--farbe-fokus)); outline-offset: 2px; }
+
+button {
+  font: inherit; font-weight: 600; min-height: 48px; padding: 0 22px;
+  border-radius: 8px; border: 1px solid transparent; cursor: pointer;
+}
+button:disabled { opacity: .45; cursor: not-allowed; }
+.primaer { background: var(--ffw-rot); color: #fff; }
+.primaer:hover:not(:disabled) { background: #b30000; }
+.sekundaer { background: rgb(var(--farbe-stufe-stark)); color: rgb(var(--farbe-titel)); }
+.sekundaer:hover:not(:disabled) { border-color: rgb(var(--farbe-rand-betont)); }
+.knoepfe { display: flex; gap: 12px; justify-content: flex-end; }
+.knoepfe .links { margin-right: auto; }
+
+.meldung { border-radius: 8px; padding: 12px 16px; border: 1px solid; }
+.meldung.fehler { border-color: rgb(var(--kritisch) / .6); background: rgb(var(--kritisch) / .1); }
+.meldung.ok { border-color: rgb(var(--erledigt) / .6); background: rgb(var(--erledigt) / .08); }
+
+.server-karte { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; }
+.server-karte dt { color: rgb(var(--farbe-nebentext)); }
+.server-karte dd { margin: 0; color: rgb(var(--farbe-titel)); }
+
+/* ── Datenbaum ──────────────────────────────────────────────────── */
+.region { border: 1px solid rgb(var(--farbe-rand)); border-radius: 12px; overflow: hidden; }
+.region + .region { margin-top: 12px; }
+.region > label {
+  display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 0 16px;
+  background: rgb(var(--farbe-stufe)); color: rgb(var(--farbe-titel)); font-weight: 600; cursor: pointer;
+}
+.gruppe { padding: 8px 16px 12px 44px; }
+.gruppe h3 { margin: 8px 0 4px; font-size: 13px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: rgb(var(--farbe-nebentext)); }
+.paket { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; min-height: 44px; cursor: pointer; }
+.paket .titel { color: rgb(var(--farbe-text)); }
+.paket .lizenz { display: block; font-size: 13px; color: rgb(var(--farbe-nebentext)); }
+.paket .chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: rgb(var(--farbe-stufe-stark)); color: rgb(var(--farbe-titel)); margin-left: 8px; }
+.paket.aus { opacity: .5; cursor: default; }
+input[type='checkbox'] { width: 20px; height: 20px; accent-color: var(--ffw-rot); }
+
+.summe { display: flex; gap: 32px; flex-wrap: wrap; }
+.summe div { display: flex; flex-direction: column; }
+.summe .wert { font-size: 22px; color: rgb(var(--farbe-titel)); }
+
+/* ── Fortschritt ────────────────────────────────────────────────── */
+.balken { height: 10px; border-radius: 999px; background: rgb(var(--farbe-stufe)); overflow: hidden; }
+.balken > span { display: block; height: 100%; background: var(--ffw-rot); transition: width .2s; }
+.datei { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; padding: 10px 0; border-bottom: 1px solid rgb(var(--farbe-rand)); }
+.datei:last-child { border-bottom: 0; }
+.datei .balken { grid-column: 1 / -1; height: 6px; }
+.dreht { display: inline-block; width: 16px; height: 16px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: dreh 0.8s linear infinite; vertical-align: -3px; }
+@keyframes dreh { to { transform: rotate(360deg); } }
+
+@media (max-width: 760px) {
+  #app { grid-template-columns: 1fr; }
+  .leiste { display: none; }
+  .inhalt { padding: 24px 16px; }
+}
