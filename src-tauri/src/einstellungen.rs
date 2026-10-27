@@ -20,6 +20,9 @@ pub struct Einstellungen {
     /// beim Öffnen kurz nicht antwortet.
     #[serde(default)]
     pub konfig: Option<ClientKonfig>,
+    /// Wann `konfig` zuletzt vom Server gelesen wurde (Unix-Sekunden, #792).
+    #[serde(default)]
+    pub konfig_geprueft: Option<u64>,
     #[serde(default)]
     pub datenordner: Option<PathBuf>,
     /// Assistent einmal vollständig durchlaufen.
@@ -61,6 +64,7 @@ mod tests {
             datenordner: Some(d.path().join("daten")),
             eingerichtet: true,
             vollbild: true,
+            konfig_geprueft: Some(1_790_000_000),
             ..Default::default()
         };
         e.schreiben(d.path()).unwrap();

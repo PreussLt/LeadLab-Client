@@ -54,7 +54,29 @@ In jede Seite außer der Assistentenseite spritzt der Client
 Die Frontend-Weiche der Oberfläche liest daraus die lokale Adresse
 (Hauptrepo CS8 #763). IPC-Rechte bekommt die entfernte Seite weiterhin nicht. Das Menü
 **LeadLab** bietet *Daten verwalten*, *Server wechseln*, *Neu laden* (F5),
-*Vollbild ein/aus* (F11) und *Beim Start im Vollbild*.
+*Vollbild ein/aus* (F11), *Beim Start im Vollbild* und *Einstellungen …*
+(Strg+,).
+
+## Einstellungen
+
+*LeadLab › Einstellungen …* zeigt den Zustand des Arbeitsplatzes auf einer
+lokalen Seite (Hauptrepo #792, Konzept §8.6):
+
+- **Server:** Konfigurationsadresse, Name, Landkreis, Oberfläche,
+  Startzentrale, Datenzugang, letzte Prüfung, die rohe Konfiguration;
+  *Neu prüfen*, *Server wechseln*.
+- **Anmeldung:** Status und Konto aus dem ID-Token; *Anmelden*, *Abmelden*.
+- **Daten:** Speicherort mit belegtem und freiem Platz, Tabelle der lokalen
+  Pakete (Region, Gruppe, Paket, Version, Größe, Zoom, geprüft);
+  *Auf Aktualisierungen prüfen*, *Ordner öffnen*, *Speicherort ändern*,
+  *Daten verwalten*, *Entfernen* (mit Rückfrage in der Zeile).
+- **Lokaler Dienst:** Adresse des Loopback-Servers, ausgelieferte Antworten,
+  letztes Laden der Oberfläche.
+- **Programm:** Version, Plattform, Update-Stand, Startverhalten, Pfade der
+  Einstellungs- und Zustandsdatei.
+
+Die Pakettabelle braucht kein Netz: Nach jedem Download stehen die Pakete mit
+ihren Katalogangaben in `zustand.json` (Feld `pakete`).
 
 ## Vollbild
 
@@ -94,7 +116,7 @@ Benötigt Node 20+, Rust stable und unter Linux die WebKitGTK-Pakete (siehe
 
 ```bash
 npm install
-npm test                 # Vitest: Assistentenlogik
+npm test                 # Vitest: Assistentenlogik, Einstellungsseite
 npm run tauri dev        # Client mit Hot-Reload
 (cd src-tauri && cargo test)   # Rust: Konfig, Katalog/Plan, Ablage, Downloader
 npm run tauri build      # Pakete: NSIS/MSI (Windows), AppImage/deb (Linux)
@@ -145,8 +167,8 @@ ein.
 
 | Datei | Aufgabe |
 | --- | --- |
-| `src/main.ts` | Assistent (Schritte, Anzeige, Fortschritt) |
-| `src/logik.ts` | Reine Logik: Baum, Auswahl, Sperren, Größen, Vorauswahl |
+| `src/main.ts` | Assistent (Schritte, Anzeige, Fortschritt) und Einstellungsseite |
+| `src/logik.ts` | Reine Logik: Baum, Auswahl, Sperren, Größen, Vorauswahl, Pakettabelle |
 | `src-tauri/src/konfig.rs` | Konfigurationsadresse auflösen und prüfen |
 | `src-tauri/src/katalog.rs` | Katalog, Auswahl auflösen, Plan gegen die Ablage |
 | `src-tauri/src/ablage.rs` | Datenordner, sichere Pfade, Zustand, freier Speicher |
@@ -157,6 +179,7 @@ ein.
 | `src-tauri/src/lokal.rs` | Loopback-Server für lokale Pakete, Initialisierungsskript |
 | `src-tauri/src/pmtiles.rs` | PMTiles v3 lesen (Hilbert-Ids, Blattverzeichnisse) |
 | `src-tauri/src/vollbild.rs` | Kommandozeile, Monitorwahl, Schwebeknopf-Skript |
+| `src-tauri/src/uebersicht.rs` | Pakettabelle, Paketstand nach dem Download, Paket entfernen |
 | `src-tauri/src/lib.rs` | Tauri-Befehle, Menü, Navigation zur Server-Oberfläche, Vollbild |
 
 **Sicherheit:** IPC-Rechte hat nur die lokale Assistentenseite

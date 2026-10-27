@@ -4,16 +4,22 @@
 // Speicherort → Download → Fertig. Der Rust-Kern
 // macht alles mit Netz und Platte; diese Seite zeigt nur an und sammelt die
 // Auswahl. Einstieg über das Fenstermenü: #server bzw. #daten.
+//
+// Daneben der Konfigurationsmodus (#792, Fragment #einstellungen, Menü
+// „LeadLab › Einstellungen …“, Strg+,): Zustand von Server, Anmeldung,
+// lokalen Daten, Loopback-Dienst und Programm auf einer Seite.
 
 import './stil.css'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import {
   type Auswahl, type ClientKonfig, type Katalog,
-  anmeldungNoetig, aufgeloest, baum, gesamt, gesperrt, groesse, nachServer, paketBytes, umschalten, vorauswahl,
+  type PaketZeile,
+  aktualisierungen, anmeldungNoetig, aufgeloest, baum, gesamt, gesperrt, groesse, gruppenTitel, nachServer, paketBytes,
+  paketTabelle, startverhalten, summeBytes, umschalten, vorauswahl, zeitpunkt, zoomText,
 } from './logik'
 
-type Schritt = 'start' | 'server' | 'anmeldung' | 'daten' | 'ort' | 'laden' | 'fertig'
+type Schritt = 'start' | 'server' | 'anmeldung' | 'daten' | 'ort' | 'laden' | 'fertig' | 'einstellungen'
 
 interface StartInfo {
   einstellungen: { konfig_adresse?: string | null; konfig?: ClientKonfig | null; datenordner?: string | null; eingerichtet: boolean }
@@ -23,6 +29,25 @@ interface StartInfo {
 }
 interface Plan { pakete: string[]; laden: { pfad: string; bytes: number }[]; loeschen: string[]; bytes_gesamt: number; bytes_zu_laden: number; unbekannt: string[] }
 interface UpdateInfo { verfuegbar: boolean; version?: string | null; notizen?: string | null; hinweis?: string | null }
+interface Anmeldestand { noetig: boolean; angemeldet: boolean; konto?: string | null }
+/** Spiegelt `Uebersicht` in lib.rs. */
+interface Uebersicht {
+  einstellungen: StartInfo['einstellungen'] & { konfig_geprueft?: number | null; vollbild?: boolean }
+  anmeldung: Anmeldestand | null
+  datenordner: string
+  frei: number | null
+  belegt: number
+  pakete: PaketZeile[]
+  auswahl: Auswahl
+  katalog_erzeugt: string | null
+  lokal: { adresse: string; status: string; pakete: number; geliefert: number; zuletzt_geladen: string | null; zuletzt_geladen_um: number | null }
+  programm: {
+    version: string; plattform: string; update: UpdateInfo | null; vollbild_einstellung: boolean
+    argumente: { vollbild: boolean | null; monitor: number | null }
+    einstellungen_datei: string | null; zustand_datei: string
+  }
+  laeuft: boolean
+}
 interface Fortschritt { pfad: string; geladen: number; gesamt: number; stand: 'laeuft' | 'fertig' | 'fehler'; meldung?: string | null }
 
 const z = {
@@ -44,6 +69,12 @@ const z = {
   anmeldung: null as { noetig: boolean; angemeldet: boolean } | null,
   /** Update des Clients (CS9): Ergebnis der letzten Prüfung. */
   update: null as UpdateInfo | null,
+  /** Konfigurationsmodus (#792). */
+  uebersicht: null as Uebersicht | null,
+  /** Paket-Id, deren Entfernen gerade bestätigt werden soll. */
+  entfernen: null as string | null,
+  /** Ergebnis von „Auf Aktualisierungen prüfen“. */
+  aktualisierung: null as { offen: boolean; text: string } | null,
 }
 
 const SCHRITTE: { id: Schritt; titel: string }[] = [
@@ -80,6 +111,7 @@ async function schritt(s: Schritt) {
   zeichne()
   if (s === 'anmeldung') await anmeldungAbfragen()
   if (s === 'daten' && !z.katalog) await katalogLaden()
+  if (s === 'einstellungen') await einstellungenLaden()
 }
 
 async function anmeldungAbfragen() {
@@ -232,8 +264,85 @@ async function automatischStarten() {
   }
 }
 
+// ── Konfigurationsmodus (#792) ─────────────────────────────────────────────
+async function einstellungenLaden() {
+  try {
+    z.uebersicht = await invoke<Uebersicht>('zustand_uebersicht')
+    z.ordner = z.uebersicht.datenordner
+    if (z.uebersicht.programm.update) z.update = z.uebersicht.programm.update
+  } catch (e) {
+    z.fehler = fehlerText(e)
+  }
+  zeichne()
+  // Nachladen, was Netz braucht — die Seite steht schon.
+  const u = z.uebersicht
+  if (u?.anmeldung?.angemeldet && !u.anmeldung.konto) {
+    try {
+      u.anmeldung = await invoke<Anmeldestand>('anmeldung_pruefen')
+      zeichne()
+    } catch { /* Kontoname bleibt offen; der Status steht schon da */ }
+  }
+  if (u && z.update === null) { await updatePruefen(); zeichne() }
+}
+
+/** Fehler zeigen, ohne die Seite zu verlassen. */
+async function versuche(f: () => Promise<unknown>) {
+  z.beschaeftigt = true; z.fehler = ''; zeichne()
+  try {
+    await f()
+  } catch (e) {
+    z.fehler = fehlerText(e)
+  } finally {
+    z.beschaeftigt = false
+  }
+  await einstellungenLaden()
+}
+
+const konfigNeuPruefen = () => versuche(async () => {
+  z.konfig = await invoke<ClientKonfig>('konfig_neu_pruefen')
+  z.katalog = null
+})
+const einstellungAnmelden = () => versuche(async () => { await invoke('anmelden'); z.katalog = null })
+const einstellungAbmelden = () => versuche(async () => { await invoke('abmelden'); z.katalog = null })
+const ordnerOeffnen = (welcher: 'daten' | 'einstellungen') => versuche(() => invoke('ordner_oeffnen', { welcher }))
+const paketEntfernen = (id: string) => versuche(async () => {
+  z.entfernen = null
+  await invoke('paket_entfernen', { id })
+  z.katalog = null; z.aktualisierung = null
+})
+const nachUpdateSuchen = () => versuche(async () => { z.update = null; await updatePruefen() })
+
+async function aktualisierungPruefen() {
+  await katalogLaden()
+  z.aktualisierung = z.katalog && z.plan ? aktualisierungen(z.plan) : null
+  zeichne()
+}
+
+async function speicherortAendern() {
+  await schritt('ort')
+  if (!z.katalog) await katalogLaden()
+}
+
 // ── Ansichten ──────────────────────────────────────────────────────────────
+const ABSCHNITTE: { id: string; titel: string }[] = [
+  { id: 'e-server', titel: 'Server' },
+  { id: 'e-anmeldung', titel: 'Anmeldung' },
+  { id: 'e-daten', titel: 'Daten' },
+  { id: 'e-dienst', titel: 'Lokaler Dienst' },
+  { id: 'e-programm', titel: 'Programm' },
+]
+
 function leiste(): HTMLElement {
+  if (z.schritt === 'einstellungen') {
+    return h('nav', { class: 'leiste', 'aria-label': 'Abschnitte' },
+      h('div', { class: 'marke' }, h('img', { src: '/leadlab.png', alt: '' }), h('strong', {}, 'LeadLab')),
+      ...ABSCHNITTE.map((a) => h('button', {
+        type: 'button', class: 'schritt sprung',
+        onclick: () => document.getElementById(a.id)?.scrollIntoView({ block: 'start' }),
+      }, a.titel)),
+      h('div', { class: 'fuss nebentext' }, 'Client ', h('span', { class: 'mono' }, z.info?.version ?? '')),
+    )
+  }
   const idx = SCHRITTE.findIndex((s) => s.id === z.schritt)
   return h('nav', { class: 'leiste', 'aria-label': 'Schritte' },
     h('div', { class: 'marke' }, h('img', { src: '/leadlab.png', alt: '' }), h('strong', {}, 'LeadLab')),
@@ -468,6 +577,162 @@ function ansichtLaden(): HTMLElement {
   )
 }
 
+function eintrag(name: string, wert: Kind, mono = false): HTMLElement[] {
+  return [h('dt', {}, name), h('dd', { class: mono ? 'mono' : undefined }, wert || '–')]
+}
+
+function ansichtEinstellungen(): HTMLElement {
+  const u = z.uebersicht
+  if (!u) {
+    return h('section', { class: 'inhalt' }, h('h1', {}, 'Einstellungen'),
+      fehlerFeld() ?? h('p', {}, h('span', { class: 'dreht', 'aria-hidden': 'true' }), ' Zustand wird gelesen'))
+  }
+  const e = u.einstellungen
+  const k = e.konfig ?? null
+  const a = u.anmeldung
+  const tabelle = paketTabelle(u.pakete)
+  const sv = startverhalten(u.programm.vollbild_einstellung, u.programm.argumente)
+  const upd = z.update
+  return h('section', { class: 'inhalt' },
+    h('h1', {}, 'Einstellungen'),
+    h('p', { class: 'einleitung' }, 'Der Zustand dieses Arbeitsplatzes. Die Konfiguration selbst kommt vom Server und lässt sich hier nicht bearbeiten.'),
+    fehlerFeld(),
+
+    // 1. Server
+    h('div', { class: 'panel abschnitt', id: 'e-server' },
+      h('h2', {}, 'Server'),
+      h('dl', { class: 'server-karte' },
+        ...eintrag('Konfigurationsadresse', e.konfig_adresse, true),
+        ...eintrag('Server', k?.name),
+        ...eintrag('Landkreis', k?.marke?.landkreis),
+        ...eintrag('Version', k?.server_version, true),
+        ...eintrag('Oberfläche', k?.oberflaeche, true),
+        ...eintrag('Startzentrale', k?.startzentrale, true),
+        ...eintrag('Datenzugang', k ? (k.daten.zugang === 'offen' ? 'offen' : 'mit Anmeldung') : null),
+        ...eintrag('Zuletzt geprüft', zeitpunkt(e.konfig_geprueft), true),
+      ),
+      k && h('details', {}, h('summary', {}, `Konfiguration (${k.schema})`),
+        h('pre', { class: 'mono roh' }, JSON.stringify(k, null, 2))),
+      h('div', { class: 'knoepfe' },
+        h('button', { class: 'sekundaer', onclick: () => { z.eingabe = e.konfig_adresse ?? ''; void schritt('server') } }, 'Server wechseln'),
+        h('button', { class: 'sekundaer', disabled: z.beschaeftigt || !e.konfig_adresse, onclick: konfigNeuPruefen }, 'Neu prüfen'),
+      ),
+    ),
+
+    // 2. Anmeldung
+    h('div', { class: 'panel abschnitt', id: 'e-anmeldung' },
+      h('h2', {}, 'Anmeldung'),
+      !a || (!a.noetig && !k?.anmeldung)
+        ? h('p', { class: 'nebentext' }, 'Dieser Server gibt seine Daten ohne Anmeldung heraus.')
+        : h('div', {},
+          h('dl', { class: 'server-karte' },
+            ...eintrag('Angemeldet', a.angemeldet ? 'ja' : 'nein'),
+            ...eintrag('Konto', a.angemeldet ? (a.konto ?? 'wird beim nächsten Datenabruf bekannt') : null),
+            ...eintrag('Für die Daten nötig', a.noetig ? 'ja' : 'nein'),
+          ),
+          h('div', { class: 'knoepfe' },
+            a.angemeldet
+              ? h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: einstellungAbmelden }, 'Abmelden')
+              : h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: einstellungAnmelden },
+                z.beschaeftigt ? 'Warte auf den Browser …' : 'Im Browser anmelden'),
+          )),
+    ),
+
+    // 3. Daten
+    h('div', { class: 'panel abschnitt', id: 'e-daten' },
+      h('h2', {}, 'Daten'),
+      h('dl', { class: 'server-karte' }, ...eintrag('Speicherort', u.datenordner, true)),
+      h('div', { class: 'summe' },
+        h('div', {}, h('span', { class: 'nebentext' }, 'Belegt'), h('span', { class: 'wert mono' }, groesse(u.belegt))),
+        h('div', {}, h('span', { class: 'nebentext' }, 'Frei am Speicherort'), h('span', { class: 'wert mono' }, u.frei === null ? '–' : groesse(u.frei))),
+        h('div', {}, h('span', { class: 'nebentext' }, 'Katalogstand'), h('span', { class: 'wert mono' }, u.katalog_erzeugt ?? '–')),
+      ),
+      tabelle.length === 0
+        ? h('p', { class: 'nebentext' }, 'Keine lokalen Daten. Karten und Gelände kommen vom Server.')
+        : h('div', { class: 'tabelle-rahmen' }, h('table', { class: 'tabelle' },
+          h('thead', {}, h('tr', {}, ...['Region', 'Gruppe', 'Paket', 'Version', 'Größe', 'Zoom', 'Geprüft', ''].map((t) => h('th', { scope: 'col' }, t)))),
+          h('tbody', {}, ...tabelle.map((p) => h('tr', {},
+            h('td', {}, p.region ?? '–'),
+            h('td', {}, gruppenTitel(p.gruppe)),
+            h('td', {}, p.titel, !p.vollstaendig ? h('span', { class: 'chip kritisch' }, 'unvollständig') : null),
+            h('td', { class: 'mono' }, p.version ?? '–'),
+            h('td', { class: 'mono zahl' }, groesse(p.bytes)),
+            h('td', { class: 'mono' }, zoomText(p.zoom)),
+            h('td', { class: 'mono' }, zeitpunkt(p.geprueft)),
+            h('td', { class: 'aktion' }, entfernenKnopf(p, u.laeuft)),
+          ))),
+          h('tfoot', {}, h('tr', {}, h('td', { colspan: 4 }, `${tabelle.length} ${tabelle.length === 1 ? 'Eintrag' : 'Einträge'}`),
+            h('td', { class: 'mono zahl' }, groesse(summeBytes(tabelle))), h('td', { colspan: 3 }))),
+        )),
+      z.aktualisierung && h('div', { class: `meldung ${z.aktualisierung.offen ? 'hinweis' : 'ok'}`, role: 'status' }, z.aktualisierung.text),
+      h('div', { class: 'knoepfe' },
+        h('button', { class: 'sekundaer links', disabled: z.beschaeftigt || !k, onclick: aktualisierungPruefen }, 'Auf Aktualisierungen prüfen'),
+        h('button', { class: 'sekundaer', onclick: () => ordnerOeffnen('daten') }, 'Ordner öffnen'),
+        h('button', { class: 'sekundaer', disabled: !k || u.laeuft, onclick: speicherortAendern }, 'Speicherort ändern'),
+        h('button', { class: 'sekundaer', disabled: !k, onclick: () => schritt(u.laeuft ? 'laden' : 'daten') }, u.laeuft ? 'Download ansehen' : 'Daten verwalten'),
+      ),
+    ),
+
+    // 4. Lokaler Dienst
+    h('div', { class: 'panel abschnitt', id: 'e-dienst' },
+      h('h2', {}, 'Lokaler Dienst'),
+      h('p', { class: 'nebentext' }, 'Der Client liefert die lokalen Pakete über eine Adresse auf diesem Rechner aus. Die Oberfläche bekommt sie beim Laden über window.__LEADLAB_CLIENT__.'),
+      h('dl', { class: 'server-karte' },
+        ...eintrag('Adresse', u.lokal.adresse, true),
+        ...eintrag('Status', u.lokal.status, true),
+        ...eintrag('Pakete im Dienst', String(u.lokal.pakete), true),
+        ...eintrag('Ausgeliefert seit Start', `${u.lokal.geliefert} Antworten`, true),
+        ...eintrag('Oberfläche zuletzt geladen', u.lokal.zuletzt_geladen
+          ? `${u.lokal.zuletzt_geladen} · ${zeitpunkt(u.lokal.zuletzt_geladen_um)}`
+          : 'noch nicht in diesem Lauf', !!u.lokal.zuletzt_geladen),
+      ),
+    ),
+
+    // 5. Programm
+    h('div', { class: 'panel abschnitt', id: 'e-programm' },
+      h('h2', {}, 'Programm'),
+      h('dl', { class: 'server-karte' },
+        ...eintrag('Client-Version', u.programm.version, true),
+        ...eintrag('Plattform', u.programm.plattform, true),
+        ...eintrag('Update', upd === null ? 'wird geprüft …'
+          : upd.verfuegbar ? `Version ${upd.version ?? ''} verfügbar` : (upd.hinweis ?? 'Dieser Client ist aktuell.')),
+        ...eintrag('Oberfläche öffnen im', sv.modus),
+        ...eintrag('Monitor', sv.monitor),
+        ...eintrag('Einstellungsdatei', u.programm.einstellungen_datei, true),
+        ...eintrag('Zustandsdatei', u.programm.zustand_datei, true),
+      ),
+      h('p', { class: 'nebentext' }, 'Das Startverhalten stellt „LeadLab › Beim Start im Vollbild“ im Menü um; --vollbild, --fenster und --monitor N gelten für einen Start.'),
+      h('div', { class: 'knoepfe' },
+        h('button', { class: 'sekundaer links', onclick: () => ordnerOeffnen('einstellungen') }, 'Einstellungsordner öffnen'),
+        upd?.verfuegbar
+          ? h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: updateInstallieren }, 'Jetzt aktualisieren')
+          : h('button', { class: 'sekundaer', disabled: z.beschaeftigt || !k, onclick: nachUpdateSuchen }, 'Nach Update suchen'),
+      ),
+    ),
+
+    // 6. Zurück
+    h('div', { class: 'knoepfe' },
+      h('button', { class: 'primaer', disabled: !k, onclick: oeffnen }, 'LeadLab öffnen'),
+    ),
+  )
+}
+
+/** „Entfernen“ mit Rückfrage in der Zeile (kein Systemdialog). */
+function entfernenKnopf(p: PaketZeile, laeuft: boolean): Kind {
+  if (!p.id) return h('span', { class: 'nebentext klein' }, p.sperre ?? '')
+  if (p.sperre) return h('span', { class: 'nebentext klein' }, p.sperre)
+  if (z.entfernen === p.id) {
+    const id = p.id
+    return h('span', { class: 'rueckfrage' },
+      h('button', { class: 'sekundaer klein', onclick: () => { z.entfernen = null; zeichne() } }, 'Behalten'),
+      h('button', { class: 'gefahr klein', disabled: z.beschaeftigt, onclick: () => paketEntfernen(id) }, `${groesse(p.bytes)} löschen`))
+  }
+  return h('button', {
+    class: 'sekundaer klein', disabled: laeuft || z.beschaeftigt,
+    onclick: () => { z.entfernen = p.id; zeichne() },
+  }, 'Entfernen')
+}
+
 function ansichtFertig(): HTMLElement {
   if (z.update === null) void updatePruefen().then(zeichne)
   return h('section', { class: 'inhalt' },
@@ -489,7 +754,7 @@ function zeichne() {
   const app = document.getElementById('app')!
   const ansicht = {
     start: ansichtStart, server: ansichtServer, anmeldung: ansichtAnmeldung, daten: ansichtDaten,
-    ort: ansichtOrt, laden: ansichtLaden, fertig: ansichtFertig,
+    ort: ansichtOrt, laden: ansichtLaden, fertig: ansichtFertig, einstellungen: ansichtEinstellungen,
   }[z.schritt]()
   app.replaceChildren(leiste(), ansicht)
 }
@@ -512,8 +777,16 @@ async function start() {
   z.konfig = e.konfig ?? null
   z.ordner = e.datenordner ?? z.info.standard_datenordner
 
+  // Das Menü navigiert auf dieselbe Seite mit neuem Fragment; steht der
+  // Assistent schon da, lädt sie nicht neu.
+  window.addEventListener('hashchange', () => {
+    const f = location.hash.replace('#', '')
+    if (f === 'server' || f === 'einstellungen' || (f === 'daten' && z.konfig)) void schritt(f as Schritt)
+  })
+
   const ziel = location.hash.replace('#', '')
   if (ziel === 'server') return schritt('server')
+  if (ziel === 'einstellungen' && e.konfig) return schritt('einstellungen')
   if (ziel === 'daten' && e.konfig) return schritt('daten')
   if (e.eingerichtet && e.konfig_adresse) { z.schritt = 'start'; return automatischStarten() }
   return schritt('server')

@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
@@ -51,6 +52,9 @@ pub struct Paket {
 struct Geteilt {
     ordner: RwLock<PathBuf>,
     dateien: Mutex<HashMap<PathBuf, (Option<SystemTime>, Arc<pmtiles::Datei>)>>,
+    /// Ausgelieferte Kacheln und LoD2-Antworten seit dem Start (#792:
+    /// zeigt, ob die Oberfläche den Dienst wirklich nutzt).
+    geliefert: AtomicU64,
 }
 
 /// Ein laufender Loopback-Server.
@@ -74,7 +78,11 @@ impl Lokal {
         let lokal = Lokal {
             port: l.local_addr()?.port(),
             token: token(),
-            geteilt: Arc::new(Geteilt { ordner: RwLock::new(ordner), dateien: Mutex::new(HashMap::new()) }),
+            geteilt: Arc::new(Geteilt {
+                ordner: RwLock::new(ordner),
+                dateien: Mutex::new(HashMap::new()),
+                geliefert: AtomicU64::new(0),
+            }),
         };
         let bedienung = lokal.clone();
         tokio::spawn(async move {
@@ -92,6 +100,11 @@ impl Lokal {
     /// Basisadresse für die Oberfläche: `http://127.0.0.1:<port>/t/<token>`.
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}/t/{}", self.port, self.token)
+    }
+
+    /// Wie viele Daten-Antworten (200, ohne `/status`) der Dienst gab.
+    pub fn geliefert(&self) -> u64 {
+        self.geteilt.geliefert.load(Ordering::Relaxed)
     }
 
     /// Neuer Datenordner (Assistent „Speicherort“).
@@ -245,6 +258,9 @@ impl Lokal {
             let mut teile = erste.split_whitespace();
             let (methode, ziel) = (teile.next().unwrap_or(""), teile.next().unwrap_or(""));
             let a = self.antwort(methode, ziel);
+            if a.status == 200 && methode == "GET" && !ziel.ends_with("/status") {
+                self.geteilt.geliefert.fetch_add(1, Ordering::Relaxed);
+            }
             s.write_all(&a.bytes(methode == "HEAD", schliessen)).await?;
             if schliessen {
                 return Ok(());
@@ -541,6 +557,9 @@ mod tests {
         assert_eq!(r.status().as_u16(), 204);
         assert_eq!(r.headers()["access-control-allow-private-network"], "true");
         assert!(basis.starts_with("http://127.0.0.1:"));
+        c.get(format!("{basis}/status")).send().await.unwrap();
+        c.get(format!("{basis}/kacheln/osm/14/1/1.png")).send().await.unwrap();
+        assert_eq!(l.geliefert(), 3, "nur ausgelieferte Kacheln zählen, nicht /status, 404 oder OPTIONS");
         let r = c.get(format!("http://127.0.0.1:{}/t/falsch/status", l.port)).send().await.unwrap();
         assert_eq!(r.status().as_u16(), 404);
     }

@@ -219,6 +219,9 @@ pub struct Tokens {
     pub expires_in: Option<u64>,
     #[serde(default)]
     pub refresh_token: Option<String>,
+    /// OIDC-ID-Token; nur für den Kontonamen auf der Einstellungsseite (#792).
+    #[serde(default)]
+    pub id_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -286,6 +289,21 @@ pub fn ablauf(jwt: &str) -> Option<u64> {
     let roh = URL_SAFE_NO_PAD.decode(teil.trim_end_matches('=')).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&roh).ok()?;
     v.get("exp")?.as_f64().map(|e| e as u64)
+}
+
+fn jwt_inhalt(jwt: &str) -> Option<serde_json::Value> {
+    let teil = jwt.split('.').nth(1)?;
+    let roh = URL_SAFE_NO_PAD.decode(teil.trim_end_matches('=')).ok()?;
+    serde_json::from_slice(&roh).ok()
+}
+
+/// Kontoname aus einem JWT (ungeprüft, nur zur Anzeige):
+/// `preferred_username`, sonst `email`, sonst `name`, sonst `sub`.
+pub fn konto_aus_jwt(jwt: &str) -> Option<String> {
+    let v = jwt_inhalt(jwt)?;
+    ["preferred_username", "email", "name", "sub"]
+        .iter()
+        .find_map(|k| v.get(*k).and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(str::to_string))
 }
 
 fn jetzt() -> u64 {
@@ -356,6 +374,9 @@ pub fn konto(k: &AnmeldeKonfig) -> String {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Status {
     pub angemeldet: bool,
+    /// Kontoname aus dem ID-Token — erst bekannt, wenn in diesem Lauf ein
+    /// Token geholt wurde (nach einem Neustart liegt nur das Refresh-Token vor).
+    pub konto: Option<String>,
 }
 
 /// Token-Verwaltung eines Clients: hält das Access-Token im Speicher und das
@@ -364,15 +385,20 @@ pub struct Sitzung {
     tresor: Arc<dyn Tresor>,
     /// (Konto, Access-Token, Ablauf in Unix-Sekunden)
     zugang: Mutex<Option<(String, String, u64)>>,
+    /// (Konto, Anzeigename) aus dem letzten Token.
+    name: Mutex<Option<(String, String)>>,
 }
 
 impl Sitzung {
     pub fn neu(tresor: Arc<dyn Tresor>) -> Self {
-        Sitzung { tresor, zugang: Mutex::new(None) }
+        Sitzung { tresor, zugang: Mutex::new(None), name: Mutex::new(None) }
     }
 
     pub fn status(&self, k: &AnmeldeKonfig) -> Status {
-        Status { angemeldet: matches!(self.tresor.lesen(&konto(k)), Ok(Some(_))) }
+        let angemeldet = matches!(self.tresor.lesen(&konto(k)), Ok(Some(_)));
+        let konto = konto(k);
+        let name = self.name.lock().unwrap().clone().filter(|(kt, _)| angemeldet && *kt == konto).map(|(_, n)| n);
+        Status { angemeldet, konto: name }
     }
 
     fn uebernehmen(&self, k: &AnmeldeKonfig, t: &Tokens) -> Result<(), Fehler> {
@@ -381,6 +407,10 @@ impl Sitzung {
             self.tresor.schreiben(&konto, r)?;
         }
         let bis = ablauf(&t.access_token).or_else(|| t.expires_in.map(|s| jetzt() + s)).unwrap_or(0);
+        let name = t.id_token.as_deref().and_then(konto_aus_jwt).or_else(|| konto_aus_jwt(&t.access_token));
+        if let Some(n) = name {
+            *self.name.lock().unwrap() = Some((konto.clone(), n));
+        }
         *self.zugang.lock().unwrap() = Some((konto, t.access_token.clone(), bis));
         Ok(())
     }
@@ -433,6 +463,7 @@ impl Sitzung {
 
     pub fn abmelden(&self, k: &AnmeldeKonfig) -> Result<(), Fehler> {
         *self.zugang.lock().unwrap() = None;
+        *self.name.lock().unwrap() = None;
         self.tresor.loeschen(&konto(k))
     }
 }
@@ -573,6 +604,16 @@ mod tests {
     fn ablauf_aus_jwt() {
         assert_eq!(ablauf(&jwt(1_800_000_000)), Some(1_800_000_000));
         assert_eq!(ablauf("kein.jwt"), None);
+    }
+
+    #[test]
+    fn konto_aus_dem_id_token() {
+        let t = |json: &str| format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(json));
+        assert_eq!(konto_aus_jwt(&t(r#"{"preferred_username":"kbm.mueller","email":"m@lk.de"}"#)).as_deref(), Some("kbm.mueller"));
+        assert_eq!(konto_aus_jwt(&t(r#"{"preferred_username":"","email":"m@lk.de"}"#)).as_deref(), Some("m@lk.de"));
+        assert_eq!(konto_aus_jwt(&t(r#"{"sub":"1234"}"#)).as_deref(), Some("1234"));
+        assert_eq!(konto_aus_jwt(&jwt(1)), None);
+        assert_eq!(konto_aus_jwt("kaputt"), None);
     }
 
     #[tokio::test]

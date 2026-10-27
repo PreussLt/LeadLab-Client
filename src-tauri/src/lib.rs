@@ -23,13 +23,14 @@ pub mod konfig;
 pub mod laden;
 pub mod lokal;
 pub mod pmtiles;
+pub mod uebersicht;
 pub mod vollbild;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -64,6 +65,15 @@ struct AppZustand {
     /// Letztes Umschalten — F11 kann Menü-Accelerator und Seitentaste
     /// zugleich auslösen; das zweite Signal fällt dann weg.
     vollbild_seit: Mutex<Option<Instant>>,
+    /// Ergebnis der letzten Update-Prüfung (für die Einstellungsseite).
+    update_info: Mutex<Option<aktualisierung::UpdateInfo>>,
+    /// Letztes Laden einer Server-Seite: (Adresse, Unix-Sekunden). Dort hat
+    /// das Initialisierungsskript `window.__LEADLAB_CLIENT__` gesetzt.
+    zuletzt_geladen: Mutex<Option<(String, u64)>>,
+}
+
+fn jetzt() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 fn konfig_ordner(app: &AppHandle) -> Result<PathBuf, Fehler> {
@@ -132,12 +142,18 @@ struct AnmeldeAnsicht {
     /// Der Server verlangt eine Anmeldung für die Daten.
     noetig: bool,
     angemeldet: bool,
+    /// Kontoname aus dem ID-Token, sobald in diesem Lauf ein Token vorlag.
+    konto: Option<String>,
 }
 
 fn anmelde_ansicht(z: &AppZustand, k: &ClientKonfig) -> AnmeldeAnsicht {
     let noetig = k.daten.zugang == konfig::Zugang::Anmeldung;
-    let angemeldet = k.anmeldung.as_ref().map(|a| z.sitzung.status(a).angemeldet).unwrap_or(false);
-    AnmeldeAnsicht { noetig, angemeldet }
+    let s = k.anmeldung.as_ref().map(|a| z.sitzung.status(a));
+    AnmeldeAnsicht {
+        noetig,
+        angemeldet: s.as_ref().map(|s| s.angemeldet).unwrap_or(false),
+        konto: s.and_then(|s| s.konto),
+    }
 }
 
 #[tauri::command]
@@ -158,6 +174,19 @@ async fn anmelden(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
     Ok(anmelde_ansicht(&z, &k))
 }
 
+/// Holt ein Token (per Refresh-Token), damit der Kontoname bekannt ist.
+/// Ein Netzfehler ändert nichts am Status.
+#[tauri::command]
+async fn anmeldung_pruefen(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
+    let k = aktive_konfig(&z)?;
+    if let Some(a) = &k.anmeldung {
+        if z.sitzung.status(a).angemeldet {
+            let _ = z.sitzung.token(&z.client, a).await;
+        }
+    }
+    Ok(anmelde_ansicht(&z, &k))
+}
+
 #[tauri::command]
 fn abmelden(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
     let k = aktive_konfig(&z)?;
@@ -173,6 +202,7 @@ async fn update_pruefen(app: AppHandle, z: State<'_, AppZustand>) -> Result<aktu
     let k = aktive_konfig(&z)?;
     let (info, update) = aktualisierung::pruefen(&app, k.client_update.as_ref()).await?;
     *z.update.lock().unwrap() = update;
+    *z.update_info.lock().unwrap() = Some(info.clone());
     Ok(info)
 }
 
@@ -239,6 +269,10 @@ fn laden_starten(app: AppHandle, auswahl: Auswahl, ordner: PathBuf, z: State<'_,
     };
     let ablage = Arc::new(Ablage::neu(&ordner));
     let plan = katalog::plan(&kat, &auswahl, &ablage.vorhanden());
+    // Für die Einstellungsseite (#792): welche Pakete danach lokal liegen.
+    let ids = plan.pakete.clone();
+    let geladen: BTreeSet<String> = plan.laden.iter().map(|d| d.pfad.clone()).collect();
+    let kat_stand = kat.clone();
     // Vor jeder Datei ein frisches Token (Access-Token leben Minuten).
     let token: Option<laden::TokenQuelle> = match aktive_konfig(&z) {
         Ok(k) if k.daten.zugang == konfig::Zugang::Anmeldung => {
@@ -264,8 +298,13 @@ fn laden_starten(app: AppHandle, auswahl: Auswahl, ordner: PathBuf, z: State<'_,
         let melde = Arc::new(move |f: laden::Fortschritt| {
             let _ = melder.emit("laden-fortschritt", f);
         });
-        let r = laden::ausfuehren(client, kat.basis.clone(), token, ablage, plan, auswahl, kat.erzeugt.clone(), abbruch, melde)
+        let r = laden::ausfuehren(client, kat.basis.clone(), token, ablage.clone(), plan, auswahl, kat.erzeugt.clone(), abbruch, melde)
             .await;
+        let r = r.and_then(|()| {
+            let mut zst = ablage.zustand_lesen();
+            zst.pakete = uebersicht::stand_nach_laden(&zst.pakete, &kat_stand, &ids, &geladen, jetzt());
+            ablage.zustand_schreiben(&zst)
+        });
         laeuft.store(false, Ordering::SeqCst);
         let ende = match r {
             Ok(()) => LadeEnde { ok: true, meldung: None },
@@ -293,6 +332,7 @@ fn einrichtung_speichern(app: AppHandle, ordner: PathBuf, z: State<'_, AppZustan
     if let Some((eingabe, k)) = z.geprueft.lock().unwrap().take() {
         e.konfig_adresse = Some(eingabe);
         e.konfig = Some(k);
+        e.konfig_geprueft = Some(jetzt());
     }
     if e.konfig.is_none() {
         return Err(Fehler::Eingabe("Noch kein Server geprüft.".into()));
@@ -301,6 +341,147 @@ fn einrichtung_speichern(app: AppHandle, ordner: PathBuf, z: State<'_, AppZustan
     e.datenordner = Some(ordner);
     e.eingerichtet = true;
     e.schreiben(&konfig_ordner(&app)?)
+}
+
+// ── Konfigurationsmodus (#792) ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct LokalAnsicht {
+    /// `http://127.0.0.1:<port>` ohne Pfad-Token.
+    adresse: String,
+    status: String,
+    pakete: usize,
+    /// Ausgelieferte Kacheln/LoD2-Antworten seit dem Start.
+    geliefert: u64,
+    /// Letztes Laden einer Server-Seite mit `window.__LEADLAB_CLIENT__`.
+    zuletzt_geladen: Option<String>,
+    zuletzt_geladen_um: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ProgrammAnsicht {
+    version: &'static str,
+    plattform: &'static str,
+    update: Option<aktualisierung::UpdateInfo>,
+    vollbild_einstellung: bool,
+    argumente: vollbild::Argumente,
+    einstellungen_datei: Option<PathBuf>,
+    zustand_datei: PathBuf,
+}
+
+#[derive(Serialize)]
+struct Uebersicht {
+    einstellungen: Einstellungen,
+    anmeldung: Option<AnmeldeAnsicht>,
+    datenordner: PathBuf,
+    frei: Option<u64>,
+    belegt: u64,
+    pakete: Vec<uebersicht::PaketZeile>,
+    auswahl: Auswahl,
+    katalog_erzeugt: Option<String>,
+    lokal: LokalAnsicht,
+    programm: ProgrammAnsicht,
+    /// Ein Download läuft — Entfernen ist dann gesperrt.
+    laeuft: bool,
+}
+
+fn datenordner(app: &AppHandle, z: &AppZustand) -> PathBuf {
+    z.einstellungen.lock().unwrap().datenordner.clone().unwrap_or_else(|| standard_datenordner(app))
+}
+
+/// Alles, was die Einstellungsseite zeigt, in einer Struktur — ohne Netz.
+#[tauri::command]
+fn zustand_uebersicht(app: AppHandle, z: State<'_, AppZustand>) -> Uebersicht {
+    let einstellungen = z.einstellungen.lock().unwrap().clone();
+    let ordner = datenordner(&app, &z);
+    let a = Ablage::neu(&ordner);
+    let zst = a.zustand_lesen();
+    let vorhanden = a.vorhanden();
+    let lokale = z.lokal.pakete();
+    let zoom: BTreeMap<String, [u8; 2]> = lokale.iter().filter_map(|p| p.zoom.map(|b| (p.pfad.clone(), b))).collect();
+    let groesse = |f: &str| a.ziel(f).ok().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
+    let pakete = uebersicht::zeilen(&zst, &vorhanden, &zoom, &groesse);
+    let belegt = vorhanden.keys().map(|f| groesse(f)).sum();
+    let anmeldung = einstellungen.konfig.as_ref().map(|k| anmelde_ansicht(&z, k));
+    let geladen = z.zuletzt_geladen.lock().unwrap().clone();
+    Uebersicht {
+        anmeldung,
+        frei: ablage::freier_speicher(&ordner),
+        belegt,
+        pakete,
+        auswahl: zst.auswahl.clone(),
+        katalog_erzeugt: zst.katalog_erzeugt.clone(),
+        lokal: LokalAnsicht {
+            adresse: format!("http://127.0.0.1:{}", z.lokal.port),
+            status: format!("{}/status", z.lokal.url()),
+            pakete: lokale.len(),
+            geliefert: z.lokal.geliefert(),
+            zuletzt_geladen: geladen.as_ref().map(|g| g.0.clone()),
+            zuletzt_geladen_um: geladen.map(|g| g.1),
+        },
+        programm: ProgrammAnsicht {
+            version: env!("CARGO_PKG_VERSION"),
+            plattform: std::env::consts::OS,
+            update: z.update_info.lock().unwrap().clone(),
+            vollbild_einstellung: einstellungen.vollbild,
+            argumente: z.argumente.clone(),
+            einstellungen_datei: konfig_ordner(&app).ok().map(|o| o.join(einstellungen::DATEI)),
+            zustand_datei: ordner.join(ablage::ZUSTAND),
+        },
+        laeuft: z.laeuft.load(Ordering::SeqCst),
+        datenordner: ordner,
+        einstellungen,
+    }
+}
+
+/// Die gespeicherte Konfigurationsadresse neu lesen und übernehmen.
+#[tauri::command]
+async fn konfig_neu_pruefen(app: AppHandle, z: State<'_, AppZustand>) -> Result<ClientKonfig, Fehler> {
+    let adresse = z
+        .einstellungen
+        .lock()
+        .unwrap()
+        .konfig_adresse
+        .clone()
+        .ok_or_else(|| Fehler::Eingabe("Noch kein Server eingerichtet.".into()))?;
+    let k = konfig::lade(&z.client, &adresse).await?;
+    let mut e = z.einstellungen.lock().unwrap();
+    e.konfig = Some(k.clone());
+    e.konfig_geprueft = Some(jetzt());
+    e.schreiben(&konfig_ordner(&app)?)?;
+    *z.katalog.lock().unwrap() = None;
+    Ok(k)
+}
+
+/// Ein lokales Paket löschen (Dateien und Eintrag in `zustand.json`).
+#[tauri::command]
+fn paket_entfernen(app: AppHandle, id: String, z: State<'_, AppZustand>) -> Result<(), Fehler> {
+    if z.laeuft.load(Ordering::SeqCst) {
+        return Err(Fehler::Eingabe("Während eines Downloads lässt sich kein Paket entfernen.".into()));
+    }
+    let ordner = datenordner(&app, &z);
+    let a = Ablage::neu(&ordner);
+    let (neu, weg) = uebersicht::entfernen(&a.zustand_lesen(), &id)?;
+    // Erst den Zustand schreiben: eine Datei ohne Eintrag gilt als nicht da.
+    a.zustand_schreiben(&neu)?;
+    // Offene PMTiles des Loopback-Servers loslassen (Windows sperrt sie sonst).
+    z.lokal.ordner_setzen(ordner);
+    for f in &weg {
+        a.loeschen(f)?;
+    }
+    Ok(())
+}
+
+/// Daten- oder Einstellungsordner im Dateimanager des Systems öffnen.
+#[tauri::command]
+fn ordner_oeffnen(app: AppHandle, welcher: String, z: State<'_, AppZustand>) -> Result<(), Fehler> {
+    let ordner = match welcher.as_str() {
+        "daten" => datenordner(&app, &z),
+        "einstellungen" => konfig_ordner(&app)?,
+        _ => return Err(Fehler::Eingabe("Unbekannter Ordner.".into())),
+    };
+    std::fs::create_dir_all(&ordner)?;
+    open::that_detached(&ordner).map_err(|e| Fehler::Eingabe(format!("Ordner lässt sich nicht öffnen ({e}).")))
 }
 
 #[tauri::command]
@@ -428,6 +609,7 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
         ausgenommen.push(dev.origin().ascii_serialization());
     }
     let handle = app.handle().clone();
+    let lokale_seiten = ausgenommen.clone();
     tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
         .initialization_script(&lokal::initialisierung(lokal, &ausgenommen))
         .initialization_script(&vollbild::skript(&ausgenommen))
@@ -442,10 +624,18 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
             true
         })
         // Nach jedem Laden erfährt die Seite, ob sie im Vollbild steht.
-        .on_page_load(|w, p| {
+        .on_page_load(move |w, p| {
             if p.event() == PageLoadEvent::Finished {
                 let an = w.is_fullscreen().unwrap_or(false);
                 let _ = w.eval(&vollbild::zustand_skript(an));
+                // Für die Einstellungsseite (#792): wann die Oberfläche mit
+                // `__LEADLAB_CLIENT__` zuletzt geladen wurde.
+                let herkunft = p.url().origin().ascii_serialization();
+                if !lokale_seiten.contains(&herkunft) && p.url().scheme() != "about" {
+                    if let Some(z) = w.try_state::<AppZustand>() {
+                        *z.zuletzt_geladen.lock().unwrap() = Some((herkunft, jetzt()));
+                    }
+                }
             }
         })
         .build()?;
@@ -454,6 +644,7 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
 
 fn menue(app: &AppHandle, vollbild_start: bool) -> tauri::Result<Menu<tauri::Wry>> {
     let daten = MenuItem::with_id(app, "daten", "Daten verwalten …", true, None::<&str>)?;
+    let einstellungen = MenuItem::with_id(app, "einstellungen", "Einstellungen …", true, Some("CmdOrCtrl+,"))?;
     let server = MenuItem::with_id(app, "server", "Server wechseln …", true, None::<&str>)?;
     let oberflaeche = MenuItem::with_id(app, "oberflaeche", "LeadLab öffnen", true, None::<&str>)?;
     let vollbild = MenuItem::with_id(app, "vollbild", "Vollbild ein/aus", true, Some("F11"))?;
@@ -465,7 +656,7 @@ fn menue(app: &AppHandle, vollbild_start: bool) -> tauri::Result<Menu<tauri::Wry
         app,
         "LeadLab",
         true,
-        &[&oberflaeche, &neu, &vollbild, &beim_start, &PredefinedMenuItem::separator(app)?, &daten, &server,
+        &[&oberflaeche, &neu, &vollbild, &beim_start, &PredefinedMenuItem::separator(app)?, &einstellungen, &daten, &server,
           &PredefinedMenuItem::separator(app)?, &beenden],
     )?;
     Menu::with_items(app, &[&leadlab])
@@ -502,6 +693,8 @@ pub fn run() {
                 update: Mutex::new(None),
                 argumente: vollbild::argumente(std::env::args().skip(1)),
                 vollbild_seit: Mutex::new(None),
+                update_info: Mutex::new(None),
+                zuletzt_geladen: Mutex::new(None),
             });
             if let Some(w) = app.get_webview_window("main") {
                 *app.state::<AppZustand>().startseite.lock().unwrap() = w.url().ok();
@@ -509,6 +702,7 @@ pub fn run() {
             app.set_menu(menue(app.handle(), vollbild_start)?)?;
             app.on_menu_event(|app, ev| match ev.id().as_ref() {
                 "daten" => zurueck_zum_assistenten(app, "daten"),
+                "einstellungen" => zurueck_zum_assistenten(app, "einstellungen"),
                 "server" => zurueck_zum_assistenten(app, "server"),
                 "oberflaeche" => {
                     let _ = oberflaeche_oeffnen(app.clone(), app.state());
@@ -538,7 +732,12 @@ pub fn run() {
             anmelden,
             abmelden,
             update_pruefen,
-            update_installieren
+            update_installieren,
+            anmeldung_pruefen,
+            zustand_uebersicht,
+            konfig_neu_pruefen,
+            paket_entfernen,
+            ordner_oeffnen
         ])
         .run(tauri::generate_context!())
         .expect("LeadLab-Client konnte nicht starten");

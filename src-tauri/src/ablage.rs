@@ -24,6 +24,33 @@ pub struct Zustand {
     pub dateien: BTreeMap<String, String>,
     #[serde(default)]
     pub katalog_erzeugt: Option<String>,
+    /// Pakete aus dem Katalog beim letzten Download (#792): damit die
+    /// Einstellungsseite ohne Netz zeigen kann, was lokal liegt. Ältere
+    /// Zustandsdateien haben das Feld nicht.
+    #[serde(default)]
+    pub pakete: BTreeMap<String, PaketStand>,
+}
+
+/// Was der Katalog über ein lokales Paket sagte, als es geladen wurde.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PaketStand {
+    pub region: String,
+    #[serde(default)]
+    pub region_name: Option<String>,
+    pub gruppe: String,
+    pub titel: String,
+    pub version: String,
+    #[serde(default)]
+    pub pflicht: bool,
+    #[serde(default)]
+    pub braucht: Vec<String>,
+    /// Pfad → Bytes laut Katalog.
+    #[serde(default)]
+    pub dateien: BTreeMap<String, u64>,
+    /// Unix-Sekunden, zu denen die Dateien zuletzt geladen und per SHA-256
+    /// geprüft wurden.
+    #[serde(default)]
+    pub geprueft: Option<u64>,
 }
 
 /// Katalogpfade sind relativ, ohne `..`, ohne Laufwerk und ohne Backslash.

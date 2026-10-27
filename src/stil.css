@@ -169,3 +169,30 @@ input[type='checkbox'] { width: 20px; height: 20px; accent-color: var(--ffw-rot)
   .leiste { display: none; }
   .inhalt { padding: 24px 16px; }
 }
+
+/* ── Einstellungen (#792) ───────────────────────────────────────── */
+.leiste .sprung { background: none; border: 0; font-weight: 500; text-align: left; width: 100%; }
+.leiste .sprung:hover { background: rgb(var(--farbe-stufe)); color: rgb(var(--farbe-titel)); }
+.abschnitt { display: flex; flex-direction: column; gap: 16px; scroll-margin-top: 24px; }
+h2 { margin: 0; color: rgb(var(--farbe-titel)); font-size: 20px; font-weight: 600; }
+.abschnitt .server-karte dd { overflow-wrap: anywhere; }
+details summary { cursor: pointer; color: rgb(var(--farbe-nebentext)); min-height: 44px; display: flex; align-items: center; }
+pre.roh {
+  margin: 0; padding: 12px 14px; max-height: 360px; overflow: auto; font-size: 13px;
+  background: rgb(var(--farbe-feld)); border: 1px solid rgb(var(--farbe-rand)); border-radius: 8px; color: rgb(var(--farbe-text));
+}
+.tabelle-rahmen { overflow-x: auto; }
+.tabelle { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tabelle th { text-align: left; font-weight: 600; font-size: 13px; color: rgb(var(--farbe-nebentext)); padding: 6px 10px; border-bottom: 1px solid rgb(var(--farbe-rand-stark)); }
+.tabelle td { padding: 8px 10px; border-bottom: 1px solid rgb(var(--farbe-rand)); vertical-align: middle; }
+.tabelle tfoot td { border-bottom: 0; color: rgb(var(--farbe-nebentext)); }
+.tabelle .zahl { text-align: right; }
+.tabelle .aktion { text-align: right; white-space: nowrap; }
+.tabelle .chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; margin-left: 8px; border: 1px solid currentColor; }
+.klein { font-size: 13px; }
+button.klein { min-height: 44px; padding: 0 14px; }
+.tabelle span.klein { display: inline-block; max-width: 28ch; white-space: normal; text-align: right; }
+.rueckfrage { display: inline-flex; gap: 8px; }
+.gefahr { background: var(--ffw-rot); color: #fff; }
+.gefahr:hover:not(:disabled) { filter: brightness(1.1); }
+.meldung.hinweis { border-color: rgb(var(--faellig) / .6); background: rgb(var(--faellig) / .08); }

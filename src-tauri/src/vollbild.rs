@@ -12,13 +12,14 @@
 //! und bricht die Navigation ab. Mehr als „Vollbild aus“ kann die Seite
 //! darüber nicht auslösen.
 
+use serde::Serialize;
 use url::Url;
 
 /// Pseudo-Adresse, mit der die Seite den Ausstieg anfordert.
 pub const ADRESSE_AUS: &str = "leadlab://vollbild-aus";
 
 /// Was auf der Kommandozeile stand. `None` = nichts angegeben.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Argumente {
     /// `--vollbild` → `Some(true)`, `--fenster` → `Some(false)`; das letzte gewinnt.
     pub vollbild: Option<bool>,
