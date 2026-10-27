@@ -85,6 +85,14 @@ struct AppZustand {
     /// Der Server hat die Sitzung beendet (Abmelden in der Oberfläche): die
     /// nächste Login-Umleitung führt in den Assistenten.
     serverseitig_beendet: AtomicBool,
+    /// Laufende Browser-Anmeldung (#805): Adresse, Abbruch, Verbindung.
+    warten: Mutex<Option<Arc<anmeldung::Warten>>>,
+    /// Die Anmeldung läuft im Client-Fenster: Assistentenschritt, in den es
+    /// danach zurückgeht (#805).
+    im_fenster: Mutex<Option<String>>,
+    /// Ergebnis einer Anmeldung im Client-Fenster, das die neu geladene
+    /// Assistentenseite einmal abholt.
+    anmelde_meldung: Mutex<Option<String>>,
 }
 
 fn jetzt() -> u64 {
@@ -167,6 +175,25 @@ struct AnmeldeAnsicht {
     tresor: PathBuf,
     /// Sitzung der Oberfläche im Fenster läuft bis (Unix-Sekunden, AD4).
     oberflaeche_bis: Option<u64>,
+    /// Eine Browser-Anmeldung läuft (#805).
+    warten: Option<WarteAnsicht>,
+    /// Fehler einer Anmeldung im Client-Fenster (nur in `anmeldung_status`).
+    meldung: Option<String>,
+}
+
+/// Spiegelt `anmeldung::Warten` für die Ansicht (#805).
+#[derive(Serialize)]
+struct WarteAnsicht {
+    adresse: Option<String>,
+    seit: u64,
+    /// Ein Browser hat sich am Loopback gemeldet.
+    verbunden: bool,
+    /// Startfehler des Browsers.
+    browser_fehler: Option<String>,
+    /// Die Anmeldung läuft im Client-Fenster.
+    im_fenster: bool,
+    /// Ab so vielen Sekunden ohne Verbindung nennt die Ansicht die Ausweichwege.
+    still_sek: u64,
 }
 
 fn anmelde_ansicht(z: &AppZustand, k: &ClientKonfig) -> AnmeldeAnsicht {
@@ -181,25 +208,99 @@ fn anmelde_ansicht(z: &AppZustand, k: &ClientKonfig) -> AnmeldeAnsicht {
         refresh_bis: s.refresh_bis,
         tresor: z.sitzung.tresor_pfad(),
         oberflaeche_bis: z.bff.lock().unwrap().as_ref().map(|b| b.laeuft_bis),
+        warten: z.warten.lock().unwrap().as_ref().map(|w| WarteAnsicht {
+            adresse: w.adresse().map(|u| u.to_string()),
+            seit: w.seit(),
+            verbunden: w.verbunden(),
+            browser_fehler: w.browser_fehler(),
+            im_fenster: z.im_fenster.lock().unwrap().is_some(),
+            still_sek: anmeldung::STILL_SEK,
+        }),
+        meldung: None,
     }
 }
 
+/// Stand der Anmeldung; holt einmal das Ergebnis einer Anmeldung im
+/// Client-Fenster ab (die Seite war währenddessen nicht geladen).
 #[tauri::command]
 fn anmeldung_status(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
     let k = aktive_konfig(&z)?;
+    let mut a = anmelde_ansicht(&z, &k);
+    a.meldung = z.anmelde_meldung.lock().unwrap().take();
+    Ok(a)
+}
+
+fn browser_oeffnen(u: &Url) -> Result<(), Fehler> {
+    open::that_detached(u.as_str()).map_err(|e| Fehler::Eingabe(format!("Browser lässt sich nicht öffnen ({e}).")))
+}
+
+/// Öffnet den Systembrowser zur Anmeldung und wartet auf den Rückruf. Die
+/// Ansicht fragt währenddessen `anmeldung_status` (Adresse, Verbindung) und
+/// kann abbrechen oder ins Client-Fenster wechseln (#805).
+#[tauri::command]
+async fn anmelden(app: AppHandle) -> Result<AnmeldeAnsicht, Fehler> {
+    let z = app.state::<AppZustand>();
+    let k = aktive_konfig(&z)?;
+    let a = k.anmeldung.clone().ok_or_else(|| Fehler::Server("Der Server nennt keinen Anmeldedienst.".into()))?;
+    let w = Arc::new(anmeldung::Warten::neu());
+    // Eine ältere, noch wartende Anmeldung endet; es gilt die neue.
+    if let Some(alt) = z.warten.lock().unwrap().replace(w.clone()) {
+        alt.abbrechen();
+    }
+    *z.im_fenster.lock().unwrap() = None;
+    let ergebnis = z.sitzung.anmelden(&z.client, &a, &browser_oeffnen, anmeldung::FRIST, &w).await;
+    {
+        let mut aktuell = z.warten.lock().unwrap();
+        if aktuell.as_ref().map(|x| Arc::ptr_eq(x, &w)).unwrap_or(false) {
+            *aktuell = None;
+        } else {
+            // Abgelöst von einer neueren Anmeldung: die räumt selbst auf.
+            return ergebnis.map(|_| anmelde_ansicht(&z, &k));
+        }
+    }
+    // Lief die Anmeldung im Client-Fenster, steht dort jetzt die Rückrufseite:
+    // zurück in den Assistenten, das Ergebnis holt die Seite dort ab.
+    if let Some(schritt) = z.im_fenster.lock().unwrap().take() {
+        if let Err(e) = &ergebnis {
+            if !matches!(e, Fehler::Abgebrochen) {
+                *z.anmelde_meldung.lock().unwrap() = Some(e.to_string());
+            }
+        }
+        if !auf_startseite(&app, &z) {
+            zurueck_zum_assistenten(&app, &schritt);
+        }
+    }
+    ergebnis?;
     Ok(anmelde_ansicht(&z, &k))
 }
 
-/// Öffnet den Systembrowser zur Anmeldung und wartet auf den Rückruf.
+/// Laufende Browser-Anmeldung abbrechen: Loopback zu, Zustand zurück (#805).
 #[tauri::command]
-async fn anmelden(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
-    let k = aktive_konfig(&z)?;
-    let a = k.anmeldung.clone().ok_or_else(|| Fehler::Server("Der Server nennt keinen Anmeldedienst.".into()))?;
-    let oeffne = |u: &Url| -> Result<(), Fehler> {
-        open::that_detached(u.as_str()).map_err(|e| Fehler::Eingabe(format!("Browser lässt sich nicht öffnen ({e}).")))
-    };
-    z.sitzung.anmelden(&z.client, &a, &oeffne, anmeldung::FRIST).await?;
-    Ok(anmelde_ansicht(&z, &k))
+fn anmeldung_abbrechen(z: State<'_, AppZustand>) {
+    if let Some(w) = z.warten.lock().unwrap().as_ref() {
+        w.abbrechen();
+    }
+}
+
+/// Dieselbe Anmeldeadresse noch einmal an den Systembrowser geben.
+#[tauri::command]
+fn anmeldung_browser_oeffnen(z: State<'_, AppZustand>) -> Result<(), Fehler> {
+    let u = z.warten.lock().unwrap().as_ref().and_then(|w| w.adresse());
+    browser_oeffnen(&u.ok_or_else(|| Fehler::Eingabe("Es läuft keine Anmeldung.".into()))?)
+}
+
+/// Ausweich, wenn sich kein Browser öffnet (#805): Das Hauptfenster geht auf
+/// die Anmeldeseite des Anmeldedienstes; deren Rückruf auf den Loopback
+/// funktioniert dort ebenso. Die fremde Seite bekommt keine IPC-Rechte
+/// (capabilities ohne `remote`). Danach geht es zurück zu `zurueck`.
+#[tauri::command]
+fn anmeldung_im_fenster(app: AppHandle, zurueck: String) -> Result<(), Fehler> {
+    let z = app.state::<AppZustand>();
+    let schritt = if zurueck == "einstellungen" { "einstellungen" } else { "anmeldung" };
+    let u = z.warten.lock().unwrap().as_ref().and_then(|w| w.adresse());
+    let u = u.ok_or_else(|| Fehler::Eingabe("Es läuft keine Anmeldung.".into()))?;
+    *z.im_fenster.lock().unwrap() = Some(schritt.to_string());
+    navigiere(&app, u)
 }
 
 /// Holt ein Token (per Refresh-Token), damit der Kontoname bekannt ist.
@@ -594,7 +695,12 @@ fn zustand_uebersicht(app: AppHandle, z: State<'_, AppZustand>) -> Uebersicht {
     let groesse = |f: &str| a.ziel(f).ok().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
     let pakete = uebersicht::zeilen(&zst, &vorhanden, &zoom, &groesse);
     let belegt = vorhanden.keys().map(|f| groesse(f)).sum();
-    let anmeldung = einstellungen.konfig.as_ref().map(|k| anmelde_ansicht(&z, k));
+    let anmeldung = einstellungen.konfig.as_ref().map(|k| {
+        let mut a = anmelde_ansicht(&z, k);
+        // Rückkehr aus der Anmeldung im Client-Fenster auf diese Seite (#805).
+        a.meldung = z.anmelde_meldung.lock().unwrap().take();
+        a
+    });
     let geladen = z.zuletzt_geladen.lock().unwrap().clone();
     Uebersicht {
         anmeldung,
@@ -981,6 +1087,9 @@ pub fn run() {
                 verlaengerung: AtomicBool::new(false),
                 umleitungen: Mutex::new(Vec::new()),
                 serverseitig_beendet: AtomicBool::new(false),
+                warten: Mutex::new(None),
+                im_fenster: Mutex::new(None),
+                anmelde_meldung: Mutex::new(None),
             });
             if let Some(w) = app.get_webview_window("main") {
                 *app.state::<AppZustand>().startseite.lock().unwrap() = w.url().ok();
@@ -1024,6 +1133,9 @@ pub fn run() {
             oberflaeche_oeffnen,
             anmeldung_status,
             anmelden,
+            anmeldung_abbrechen,
+            anmeldung_browser_oeffnen,
+            anmeldung_im_fenster,
             abmelden,
             update_pruefen,
             update_installieren,

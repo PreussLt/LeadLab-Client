@@ -196,3 +196,9 @@ button.klein { min-height: 44px; padding: 0 14px; }
 .gefahr { background: var(--ffw-rot); color: #fff; }
 .gefahr:hover:not(:disabled) { filter: brightness(1.1); }
 .meldung.hinweis { border-color: rgb(var(--faellig) / .6); background: rgb(var(--faellig) / .08); }
+
+/* ── Browser-Anmeldung (#805) ───────────────────────────────────── */
+.warten { display: flex; flex-direction: column; gap: 16px; }
+.warten p, .meldung p { margin: 0; }
+.meldung .knoepfe { justify-content: flex-start; margin-top: 12px; }
+input.mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 14px; }

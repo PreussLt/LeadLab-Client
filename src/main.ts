@@ -14,8 +14,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import {
   type Auswahl, type ClientKonfig, type Katalog,
-  type PaketZeile,
-  aktualisierungen, anmeldungAngeboten, aufgeloest, baum, gesamt, gesperrt, groesse, gruppenTitel, nachServer, paketBytes,
+  type PaketZeile, type WarteStand,
+  aktualisierungen, anmeldeFehler, anmeldungAngeboten, browserStill, aufgeloest, baum, gesamt, gesperrt, groesse, gruppenTitel, nachServer, paketBytes,
   paketTabelle, restdauer, startverhalten, summeBytes, umschalten, vorauswahl, zeitpunkt, zoomText,
 } from './logik'
 
@@ -34,6 +34,10 @@ interface Anmeldestand {
   noetig: boolean; angemeldet: boolean; konto?: string | null
   offline?: boolean; angemeldet_seit?: number | null; refresh_bis?: number | null
   tresor?: string | null; oberflaeche_bis?: number | null
+  /** Laufende Browser-Anmeldung (#805). */
+  warten?: WarteStand | null
+  /** Fehler einer Anmeldung im Client-Fenster, einmal abgeholt. */
+  meldung?: string | null
 }
 /** Spiegelt `Uebersicht` in lib.rs. */
 interface Uebersicht {
@@ -82,6 +86,10 @@ const z = {
   sitzungHinweis: '' as string,
   /** Ergebnis von „Auf Aktualisierungen prüfen“. */
   aktualisierung: null as { offen: boolean; text: string } | null,
+  /** Laufende Browser-Anmeldung (#805): Adresse, Verbindung, Ausweichwege. */
+  warten: null as WarteStand | null,
+  /** „Link kopieren“ hat geklappt. */
+  kopiert: false,
 }
 
 const SCHRITTE: { id: Schritt; titel: string }[] = [
@@ -124,21 +132,120 @@ async function schritt(s: Schritt) {
 async function anmeldungAbfragen() {
   try {
     z.anmeldung = await invoke<Anmeldestand>('anmeldung_status')
+    warteUebernehmen(z.anmeldung)
   } catch (e) {
     z.fehler = fehlerText(e)
   }
   zeichne()
 }
 
-async function anmelden() {
-  z.beschaeftigt = true; z.fehler = ''; zeichne()
+// ── Browser-Anmeldung (#805) ───────────────────────────────────────────────
+// `anmelden` wartet im Rust-Kern bis zum Rückruf. Die Seite fragt solange
+// jede Sekunde den Stand ab: Anmeldeadresse zum Kopieren, ob sich ein Browser
+// am Loopback gemeldet hat, und nach 20 s ohne Verbindung die Ausweichwege.
+
+/** `invoke('anmelden')` läuft aus dieser Seite (nach der Anmeldung im
+ *  Client-Fenster ist die Seite neu geladen und kennt den Aufruf nicht). */
+let anmeldungOffen = false
+let warteUhr: ReturnType<typeof setInterval> | null = null
+let warteSchluessel = ''
+
+function warteBeobachten() {
+  if (warteUhr) return
+  warteUhr = setInterval(() => { void warteStandHolen() }, 1000)
+  setTimeout(() => { void warteStandHolen() }, 300)
+}
+
+function warteBeenden() {
+  if (warteUhr) clearInterval(warteUhr)
+  warteUhr = null; z.warten = null; z.kopiert = false; warteSchluessel = ''
+}
+
+/** Stand aus dem Kern übernehmen: wartet eine Anmeldung, die Abfrage starten;
+ *  eine Meldung aus dem Client-Fenster als Fehler zeigen. */
+function warteUebernehmen(a: Anmeldestand | null | undefined) {
+  if (a?.meldung) z.fehler = anmeldeFehler(a.meldung)
+  if (a?.warten) { z.warten = a.warten; warteBeobachten() }
+}
+
+async function warteStandHolen() {
+  let a: Anmeldestand
   try {
-    z.anmeldung = await invoke<Anmeldestand>('anmelden')
+    a = await invoke<Anmeldestand>('anmeldung_status')
+  } catch {
+    return // nächster Takt versucht es wieder
+  }
+  if (a.warten) {
+    const schluessel = JSON.stringify(a.warten) + browserStill(a.warten)
+    z.warten = a.warten
+    if (schluessel !== warteSchluessel) { warteSchluessel = schluessel; zeichne() }
+    return
+  }
+  if (anmeldungOffen) return // das Ergebnis bringt der laufende Aufruf
+  // Die Anmeldung endete außerhalb dieser Seite (Client-Fenster, Frist).
+  warteBeenden()
+  z.beschaeftigt = false
+  if (a.meldung) z.fehler = anmeldeFehler(a.meldung)
+  if (z.schritt === 'einstellungen') await einstellungenLaden()
+  else { z.anmeldung = a; zeichne() }
+}
+
+async function anmelden() {
+  z.beschaeftigt = true; z.fehler = ''; anmeldungOffen = true
+  // Vorläufig, bis der Kern die Adresse nennt.
+  z.warten = { seit: Date.now() / 1000, verbunden: false }
+  warteBeobachten(); zeichne()
+  try {
+    const a = await invoke<Anmeldestand>('anmelden')
+    if (z.schritt === 'anmeldung') z.anmeldung = a
     z.katalog = null
   } catch (e) {
-    z.fehler = fehlerText(e)
+    z.fehler = anmeldeFehler(fehlerText(e))
   } finally {
-    z.beschaeftigt = false; zeichne()
+    anmeldungOffen = false; z.beschaeftigt = false
+    warteBeenden()
+  }
+  if (z.schritt === 'einstellungen') await einstellungenLaden()
+  else zeichne()
+}
+
+async function anmeldungAbbrechen() {
+  try {
+    await invoke('anmeldung_abbrechen')
+  } catch (e) {
+    z.fehler = fehlerText(e); zeichne()
+  }
+  await warteStandHolen()
+}
+
+async function browserErneut() {
+  try {
+    await invoke('anmeldung_browser_oeffnen')
+  } catch (e) {
+    z.fehler = fehlerText(e); zeichne()
+  }
+}
+
+async function imFensterAnmelden() {
+  try {
+    // Das Fenster geht auf die Anmeldeseite; danach kommt der Kern hierher zurück.
+    await invoke('anmeldung_im_fenster', { zurueck: z.schritt === 'einstellungen' ? 'einstellungen' : 'anmeldung' })
+  } catch (e) {
+    z.fehler = fehlerText(e); zeichne()
+  }
+}
+
+async function linkKopieren() {
+  const adr = z.warten?.adresse
+  if (!adr) return
+  try {
+    await navigator.clipboard.writeText(adr)
+    z.kopiert = true; zeichne()
+  } catch {
+    // Ohne Zwischenablage: Adresse markieren, Strg+C bleibt.
+    z.kopiert = false; zeichne()
+    const f = document.getElementById('anmeldeadresse') as HTMLInputElement | null
+    f?.focus(); f?.select()
   }
 }
 
@@ -275,6 +382,7 @@ async function automatischStarten() {
 async function einstellungenLaden() {
   try {
     z.uebersicht = await invoke<Uebersicht>('zustand_uebersicht')
+    warteUebernehmen(z.uebersicht.anmeldung)
     z.ordner = z.uebersicht.datenordner
     if (z.uebersicht.programm.update) z.update = z.uebersicht.programm.update
   } catch (e) {
@@ -309,7 +417,6 @@ const konfigNeuPruefen = () => versuche(async () => {
   z.konfig = await invoke<ClientKonfig>('konfig_neu_pruefen')
   z.katalog = null
 })
-const einstellungAnmelden = () => versuche(async () => { await invoke('anmelden'); z.katalog = null })
 const einstellungAbmelden = () => versuche(async () => { await invoke('abmelden'); z.katalog = null })
 const sitzungErneuern = () => versuche(async () => {
   z.sitzungHinweis = ''
@@ -437,6 +544,38 @@ function ansichtServer(): HTMLElement {
   )
 }
 
+/** Während der Browser-Anmeldung (#805): nie stumm warten — Adresse zum
+ *  Kopieren, Browser erneut öffnen, Abbrechen; ohne Browser nach 20 s die
+ *  Anmeldung im Client-Fenster. */
+function wartePanel(): HTMLElement {
+  const w = z.warten!
+  const adresse = w.adresse ?? ''
+  const still = browserStill(w)
+  return h('div', { class: 'panel warten' },
+    h('p', { role: 'status' }, h('span', { class: 'dreht', 'aria-hidden': 'true' }),
+      w.im_fenster
+        ? ' Die Anmeldung läuft im Client-Fenster …'
+        : adresse
+          ? ' Die Anmeldung wird im Browserfenster fortgesetzt. Melden Sie sich dort an; danach geht es hier von selbst weiter.'
+          : ' Anmeldeseite wird vorbereitet …'),
+    adresse && h('div', {},
+      h('label', { class: 'feldname', for: 'anmeldeadresse' }, 'Anmeldeadresse'),
+      h('div', { class: 'zeile' },
+        h('input', { type: 'text', id: 'anmeldeadresse', class: 'mono', readonly: true, value: adresse, spellcheck: 'false' }),
+        h('button', { class: 'sekundaer', onclick: linkKopieren }, z.kopiert ? 'Kopiert' : 'Link kopieren')),
+      h('p', { class: 'nebentext' }, 'Die Adresse gilt nur für diese Anmeldung und in jedem Browser auf diesem Rechner.')),
+    still && h('div', { class: 'meldung hinweis', role: 'alert' },
+      h('p', {}, h('strong', {}, 'Kein Browser hat sich gemeldet. '),
+        w.browser_fehler ? `${w.browser_fehler} ` : '',
+        'Kopieren Sie den Link in einen Browser, oder melden Sie sich hier im Client-Fenster an.'),
+      h('div', { class: 'knoepfe' },
+        h('button', { class: 'sekundaer', disabled: !adresse, onclick: imFensterAnmelden }, 'Im Client-Fenster anmelden'))),
+    h('div', { class: 'knoepfe' },
+      h('button', { class: 'sekundaer links', onclick: anmeldungAbbrechen }, 'Abbrechen'),
+      h('button', { class: 'sekundaer', disabled: !adresse || !!w.im_fenster, onclick: browserErneut }, 'Browser erneut öffnen')),
+  )
+}
+
 function ansichtAnmeldung(): HTMLElement {
   const a = z.anmeldung
   const eingerichtet = !!z.info?.einstellungen.eingerichtet
@@ -445,22 +584,22 @@ function ansichtAnmeldung(): HTMLElement {
     h('p', { class: 'einleitung' },
       'Melden Sie sich einmal im Client an. Die Anmeldung gilt für die Datenpakete und für LeadLab im Fenster — ein zweites Login gibt es nicht. ',
       'Sie hält wochenlang, bis jemand hier abmeldet oder die Verwaltung den Arbeitsplatz in der Anmeldung sperrt. Der Knopf öffnet die Anmeldeseite im Browser; danach geht es hier weiter.'),
-    h('div', { class: 'panel' },
-      a?.angemeldet
-        ? h('p', { class: 'meldung ok' },
-          a.konto ? `Angemeldet als ${a.konto}. ` : 'Angemeldet. ',
-          'Die Anmeldung liegt verschlüsselt auf diesem Rechner.',
-          a.offline === false ? ' Dieses Konto darf keine Daueranmeldung; sie endet mit der Anmeldesitzung des Servers.' : null)
-        : z.beschaeftigt
-          ? h('p', {}, h('span', { class: 'dreht', 'aria-hidden': 'true' }), ' Warte auf die Anmeldung im Browser …')
+    !a?.angemeldet && z.warten
+      ? wartePanel()
+      : h('div', { class: 'panel' },
+        a?.angemeldet
+          ? h('p', { class: 'meldung ok' },
+            a.konto ? `Angemeldet als ${a.konto}. ` : 'Angemeldet. ',
+            'Die Anmeldung liegt verschlüsselt auf diesem Rechner.',
+            a.offline === false ? ' Dieses Konto darf keine Daueranmeldung; sie endet mit der Anmeldesitzung des Servers.' : null)
           : h('p', { class: 'nebentext' }, 'Noch nicht angemeldet.'),
-    ),
+      ),
     fehlerFeld(),
     h('div', { class: 'knoepfe' },
-      h('button', { class: 'sekundaer links', onclick: () => schritt('server') }, 'Zurück'),
+      h('button', { class: 'sekundaer links', disabled: !!z.warten, onclick: () => schritt('server') }, 'Zurück'),
       a?.angemeldet
         ? h('button', { class: 'sekundaer', onclick: abmelden }, 'Abmelden')
-        : h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: anmelden }, 'Im Browser anmelden'),
+        : !z.warten && h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: anmelden }, 'Im Browser anmelden'),
       eingerichtet
         ? h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: oeffnen }, 'LeadLab öffnen')
         : h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: () => schritt('daten') }, 'Weiter'),
@@ -656,11 +795,11 @@ function ansichtEinstellungen(): HTMLElement {
             ...eintrag('Tresor', a.tresor, true),
           ),
           z.sitzungHinweis ? h('p', { class: 'meldung ok', role: 'status' }, z.sitzungHinweis) : null,
+          !a.angemeldet && z.warten ? wartePanel() : null,
           h('div', { class: 'knoepfe' },
             a.angemeldet
               ? h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: einstellungAbmelden }, 'Abmelden')
-              : h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: einstellungAnmelden },
-                z.beschaeftigt ? 'Warte auf den Browser …' : 'Im Browser anmelden'),
+              : !z.warten && h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: anmelden }, 'Im Browser anmelden'),
             a.angemeldet && h('button', { class: 'sekundaer', disabled: z.beschaeftigt || !k, onclick: sitzungErneuern }, 'Sitzung in der Oberfläche erneuern'),
           )),
     ),

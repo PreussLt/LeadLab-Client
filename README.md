@@ -22,6 +22,12 @@ dieses Grundgerüst ist CS1 #756). Dort ist dieses Repo als Submodul
    öffnet den Systembrowser auf die Keycloak-Anmeldung des Servers
    (öffentlicher Client `leadlab-client`, Authorization Code + PKCE S256), der
    Client wartet auf `http://127.0.0.1:<zufallsport>/rueckruf` (RFC 8252).
+   Währenddessen zeigt der Schritt die Anmeldeadresse mit *Link kopieren*,
+   *Browser erneut öffnen* und *Abbrechen*. Meldet sich nach 20 s kein
+   Browser am Loopback, folgt ein Hinweis mit *Im Client-Fenster anmelden*:
+   Das Fenster öffnet die Keycloak-Seite selbst, der Rückruf kommt dort
+   genauso an (#805). Nach 5 Minuten ohne Antwort bricht der Client ab und
+   sagt das.
    Angefragt wird zusätzlich `offline_access`: Die Anmeldung hält dann
    wochenlang (Offline-Token, 30 Tage ohne Nutzung), bis jemand abmeldet oder
    ein Admin die Offline-Sitzung in Keycloak widerruft. Access-, Refresh- und

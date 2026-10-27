@@ -20,6 +20,7 @@
 //!   löscht den Tresor.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering as AtomOrdnung};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -41,6 +42,9 @@ pub const DIENST: &str = "de.leadlab.client";
 pub const RUECKRUF: &str = "/rueckruf";
 /// So lange wartet der Client auf den Rückruf aus dem Browser.
 pub const FRIST: Duration = Duration::from_secs(300);
+/// So lange ohne Verbindung am Loopback, bis die Ansicht die Ausweichwege
+/// nennt (Link kopieren, Anmeldung im Client-Fenster; #805).
+pub const STILL_SEK: u64 = 20;
 /// Access-Token gilt als abgelaufen, wenn weniger als das übrig ist.
 pub const VORLAUF_SEK: u64 = 60;
 /// Scope für das Offline-Token (wochenlange Anmeldung).
@@ -129,6 +133,68 @@ pub fn anmelde_url(ep: &Endpunkte, k: &AnmeldeKonfig, redirect: &str, p: &Pkce) 
     u
 }
 
+// ── Laufende Browser-Anmeldung (#805) ──────────────────────────────────────
+
+/// Eine laufende Anmeldung im Browser: Die Ansicht zeigt die Adresse zum
+/// Kopieren, erfährt, ob sich am Loopback schon ein Browser gemeldet hat, und
+/// kann abbrechen. `open` meldet nur Startfehler des Hilfsprogramms, nicht, ob
+/// ein Browser die Adresse wirklich annimmt — darum wartet die Ansicht nie
+/// stumm.
+#[derive(Default)]
+pub struct Warten {
+    adresse: Mutex<Option<Url>>,
+    /// Start des Wartens (Unix-Sekunden).
+    seit: u64,
+    /// Mindestens eine Verbindung am Loopback (ein Browser hat sich gemeldet).
+    verbunden: AtomicBool,
+    abgebrochen: AtomicBool,
+    abbruch: tokio::sync::Notify,
+    /// Startfehler des Browsers (open): Warten geht weiter, die Ansicht nennt die Ausweichwege sofort.
+    browser_fehler: Mutex<Option<String>>,
+}
+
+impl Warten {
+    pub fn neu() -> Self {
+        Warten { seit: jetzt(), ..Default::default() }
+    }
+    pub fn adresse(&self) -> Option<Url> {
+        self.adresse.lock().unwrap().clone()
+    }
+    pub fn seit(&self) -> u64 {
+        self.seit
+    }
+    pub fn verbunden(&self) -> bool {
+        self.verbunden.load(AtomOrdnung::SeqCst)
+    }
+    pub fn browser_fehler(&self) -> Option<String> {
+        self.browser_fehler.lock().unwrap().clone()
+    }
+    /// Beendet das Warten: Der Loopback schließt, `anmelden` endet mit
+    /// `Fehler::Abgebrochen`. Wirkt auch, wenn das Warten noch nicht begonnen hat.
+    pub fn abbrechen(&self) {
+        self.abgebrochen.store(true, AtomOrdnung::SeqCst);
+        self.abbruch.notify_one();
+    }
+    pub fn abgebrochen(&self) -> bool {
+        self.abgebrochen.load(AtomOrdnung::SeqCst)
+    }
+}
+
+/// Meldung, wenn die Frist ohne Rückruf abläuft — mit der Ursache.
+pub fn frist_text(frist: Duration) -> String {
+    let s = frist.as_secs();
+    let dauer = if s >= 120 {
+        format!("{} Minuten", s / 60)
+    } else if s >= 60 {
+        "einer Minute".to_string()
+    } else if s <= 1 {
+        "einer Sekunde".to_string()
+    } else {
+        format!("{s} Sekunden")
+    };
+    format!("Innerhalb von {dauer} kam keine Antwort vom Browser. Die Anmeldung ist abgebrochen; bitte erneut anmelden.")
+}
+
 // ── Loopback-Rückruf ───────────────────────────────────────────────────────
 
 /// Lauscht auf 127.0.0.1 mit einem freien Port; liefert Listener und
@@ -187,11 +253,13 @@ pub fn rueckruf_lesen(anfragezeile: &str, state: &str) -> Rueckruf {
 }
 
 /// Wartet auf den einen Rückruf aus dem Browser und antwortet mit einer
-/// kleinen Seite. Andere Anfragen (favicon) bekommen 404.
-pub async fn rueckruf_abwarten(l: TcpListener, state: &str, frist: Duration) -> Result<String, Fehler> {
+/// kleinen Seite. Andere Anfragen (favicon) bekommen 404. Endet bei
+/// `w.abbrechen()` mit `Fehler::Abgebrochen`; der Listener ist danach zu.
+pub async fn rueckruf_abwarten(l: TcpListener, state: &str, frist: Duration, w: &Warten) -> Result<String, Fehler> {
     let warten = async {
         loop {
             let (mut s, _) = l.accept().await?;
+            w.verbunden.store(true, AtomOrdnung::SeqCst);
             let mut puffer = vec![0u8; 8192];
             let mut n = 0;
             // Nur die erste Zeile zählt; mehr als 8 KB Kopf braucht kein Rückruf.
@@ -224,9 +292,13 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n{seite}",
             }
         }
     };
-    tokio::time::timeout(frist, warten)
-        .await
-        .map_err(|_| Fehler::Eingabe("Anmeldung nicht abgeschlossen (Zeit abgelaufen).".into()))?
+    if w.abgebrochen() {
+        return Err(Fehler::Abgebrochen);
+    }
+    tokio::select! {
+        r = tokio::time::timeout(frist, warten) => r.map_err(|_| Fehler::Eingabe(frist_text(frist)))?,
+        _ = w.abbruch.notified() => Err(Fehler::Abgebrochen),
+    }
 }
 
 // ── Token-Endpunkt ─────────────────────────────────────────────────────────
@@ -530,19 +602,29 @@ impl Sitzung {
     }
 
     /// Vollständige Anmeldung: Discovery, Loopback, Browser, Code-Tausch.
-    /// `oeffne` startet den Systembrowser mit der Anmeldeadresse.
+    /// `oeffne` startet den Systembrowser mit der Anmeldeadresse. Schlägt das
+    /// fehl, wartet der Client trotzdem: Die Adresse steht in `w` zum Kopieren
+    /// oder für die Anmeldung im Client-Fenster (#805).
     pub async fn anmelden(
         &self,
         client: &reqwest::Client,
         k: &AnmeldeKonfig,
         oeffne: &(dyn Fn(&Url) -> Result<(), Fehler> + Send + Sync),
         frist: Duration,
+        w: &Warten,
     ) -> Result<Status, Fehler> {
         let ep = entdecken(client, &k.issuer).await?;
         let (l, redirect) = lauschen().await?;
         let p = Pkce::neu();
-        oeffne(&anmelde_url(&ep, k, &redirect, &p))?;
-        let code = rueckruf_abwarten(l, &p.state, frist).await?;
+        let adresse = anmelde_url(&ep, k, &redirect, &p);
+        *w.adresse.lock().unwrap() = Some(adresse.clone());
+        if w.abgebrochen() {
+            return Err(Fehler::Abgebrochen);
+        }
+        if let Err(e) = oeffne(&adresse) {
+            *w.browser_fehler.lock().unwrap() = Some(e.to_string());
+        }
+        let code = rueckruf_abwarten(l, &p.state, frist, w).await?;
         let t = code_tauschen(client, &ep, &k.client_id, &code, &redirect, &p.verifier).await?;
         {
             let _g = self.sperre.lock().await;
@@ -818,7 +900,9 @@ mod tests {
             let r = c.get(format!("{ziel}?state=s1&code=xyz")).send().await.unwrap();
             (r.status().as_u16(), r.text().await.unwrap())
         });
-        let code = rueckruf_abwarten(l, "s1", Duration::from_secs(5)).await.unwrap();
+        let w = Warten::neu();
+        let code = rueckruf_abwarten(l, "s1", Duration::from_secs(5), &w).await.unwrap();
+        assert!(w.verbunden(), "Browser hat sich am Loopback gemeldet");
         assert_eq!(code, "xyz");
         let (status, seite) = browser.await.unwrap();
         assert_eq!(status, 200);
@@ -828,8 +912,71 @@ mod tests {
     #[tokio::test]
     async fn loopback_frist() {
         let (l, _) = lauschen().await.unwrap();
-        let e = rueckruf_abwarten(l, "s", Duration::from_millis(100)).await.unwrap_err();
-        assert!(e.to_string().contains("Zeit abgelaufen"));
+        let w = Warten::neu();
+        let e = rueckruf_abwarten(l, "s", Duration::from_millis(100), &w).await.unwrap_err();
+        // Die Meldung nennt die Ursache (#805), nicht nur „Zeit abgelaufen“.
+        assert!(e.to_string().contains("kam keine Antwort vom Browser"), "{e}");
+        assert!(!w.verbunden(), "kein Browser hat sich gemeldet");
+    }
+
+    #[test]
+    fn frist_text_nennt_die_dauer() {
+        assert_eq!(
+            frist_text(FRIST),
+            "Innerhalb von 5 Minuten kam keine Antwort vom Browser. Die Anmeldung ist abgebrochen; bitte erneut anmelden."
+        );
+        assert!(frist_text(Duration::from_secs(60)).starts_with("Innerhalb von einer Minute "));
+        assert!(frist_text(Duration::from_secs(30)).starts_with("Innerhalb von 30 Sekunden "));
+        assert!(frist_text(Duration::from_millis(100)).starts_with("Innerhalb von einer Sekunde "));
+    }
+
+    #[tokio::test]
+    async fn abbruch_schliesst_den_loopback() {
+        let (l, redirect) = lauschen().await.unwrap();
+        let w = Arc::new(Warten::neu());
+        let w2 = w.clone();
+        let warten = tokio::spawn(async move { rueckruf_abwarten(l, "s", FRIST, &w2).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        w.abbrechen();
+        let e = tokio::time::timeout(Duration::from_secs(2), warten).await.expect("Abbruch wirkt sofort").unwrap().unwrap_err();
+        assert!(matches!(e, Fehler::Abgebrochen));
+        // Der Port ist zu: Ein später Rückruf landet nirgends.
+        let r = reqwest::Client::new().get(format!("{redirect}?state=s&code=x")).send().await;
+        assert!(r.is_err(), "Loopback nach dem Abbruch geschlossen");
+    }
+
+    #[tokio::test]
+    async fn abbruch_vor_dem_warten_und_browser_ohne_start() {
+        // Abbruch, bevor das Warten beginnt (Knopf schnell gedrückt): wirkt trotzdem.
+        let (l, _) = lauschen().await.unwrap();
+        let w = Warten::neu();
+        w.abbrechen();
+        assert!(matches!(rueckruf_abwarten(l, "s", FRIST, &w).await, Err(Fehler::Abgebrochen)));
+
+        // Browser startet nicht: Die Anmeldung wartet weiter, die Adresse steht
+        // zum Kopieren bereit, der Fehler wird angezeigt — und ein Browser, der
+        // die kopierte Adresse öffnet, schließt die Anmeldung ab.
+        let kc = keycloak().await;
+        let k = konfig(&kc.issuer);
+        let d = tempfile::tempdir().unwrap();
+        let s = sitzung(d.path(), Arc::default());
+        let client = reqwest::Client::new();
+        let w = Arc::new(Warten::neu());
+        let kein_browser = |_: &Url| -> Result<(), Fehler> { Err(Fehler::Eingabe("Browser lässt sich nicht öffnen (xdg-open fehlt).".into())) };
+        let (w2, kopiert) = (w.clone(), browser(&kc));
+        let nutzer = tokio::spawn(async move {
+            for _ in 0..100 {
+                if let Some(u) = w2.adresse() {
+                    assert!(w2.browser_fehler().unwrap().contains("xdg-open"));
+                    return kopiert(&u);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("keine Adresse");
+        });
+        let st = s.anmelden(&client, &k, &kein_browser, Duration::from_secs(5), &w).await.unwrap();
+        nutzer.await.unwrap().unwrap();
+        assert!(st.angemeldet && w.verbunden());
     }
 
     #[tokio::test]
@@ -842,7 +989,7 @@ mod tests {
         assert_eq!(s.token(&client, &k).await.unwrap(), None);
         assert_eq!(s.status(&k), Status::default());
 
-        let st = s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5)).await.unwrap();
+        let st = s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5), &Warten::neu()).await.unwrap();
         assert!(st.angemeldet && st.offline);
         assert_eq!(st.konto.as_deref(), Some("kbm.mueller"));
         assert!(st.angemeldet_seit.unwrap() >= jetzt() - 5);
@@ -871,7 +1018,7 @@ mod tests {
         let tresor = Tresor::neu(d.path(), Schluessel::Fest([9; 32]));
         let s = sitzung(d.path(), Arc::default());
         let client = reqwest::Client::new();
-        s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5)).await.unwrap();
+        s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5), &Warten::neu()).await.unwrap();
         let seit = s.status(&k).angemeldet_seit;
         // Access-Token abgelaufen.
         let mut e = tresor.lesen().unwrap();
@@ -903,7 +1050,7 @@ mod tests {
         let tresor = Tresor::neu(d.path(), Schluessel::Fest([9; 32]));
         let s = sitzung(d.path(), Arc::default());
         let client = reqwest::Client::new();
-        s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5)).await.unwrap();
+        s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5), &Warten::neu()).await.unwrap();
         // Admin widerruft die Offline-Sitzung: das Token im Tresor gilt nicht mehr.
         *kc.gueltig.lock().unwrap() = "widerrufen".into();
         let mut e = tresor.lesen().unwrap();
@@ -922,7 +1069,7 @@ mod tests {
         let alt = Arc::new(Speicher::default());
         let s = sitzung(d.path(), alt.clone());
         let client = reqwest::Client::new();
-        s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5)).await.unwrap();
+        s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5), &Warten::neu()).await.unwrap();
         let refresh = kc.gueltig.lock().unwrap().clone();
         alt.schreiben(&konto(&k), "alter-eintrag");
         assert!(s.abmelden(&client, &k).await.unwrap());

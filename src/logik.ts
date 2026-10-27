@@ -213,3 +213,24 @@ export function startverhalten(einstellung: boolean, args: { vollbild?: boolean 
     : 'Monitor mit dem Mauszeiger'
   return { modus, monitor }
 }
+
+// ── Browser-Anmeldung (#805) ───────────────────────────────────────────────
+// Spiegelt `WarteAnsicht` in lib.rs.
+
+export interface WarteStand {
+  adresse?: string | null; seit: number; verbunden: boolean
+  browser_fehler?: string | null; im_fenster?: boolean; still_sek?: number
+}
+
+/** Hat sich nach der Frist kein Browser am Loopback gemeldet (oder ließ er
+ *  sich gar nicht starten)? Dann nennt die Ansicht die Ausweichwege. */
+export function browserStill(w: WarteStand | null | undefined, jetzt = Date.now() / 1000): boolean {
+  if (!w || w.verbunden || w.im_fenster) return false
+  if (w.browser_fehler) return true
+  return jetzt - w.seit >= (w.still_sek ?? 20)
+}
+
+/** Fehlertext eines Anmeldeversuchs; ein Abbruch durch den Nutzer ist keiner. */
+export function anmeldeFehler(text: string): string {
+  return text === 'Abgebrochen.' ? '' : text
+}
