@@ -23,6 +23,7 @@ pub mod konfig;
 pub mod laden;
 pub mod lokal;
 pub mod pmtiles;
+pub mod tresor;
 pub mod uebersicht;
 pub mod vollbild;
 
@@ -53,8 +54,7 @@ struct AppZustand {
     laeuft: Arc<AtomicBool>,
     /// Adresse der lokalen Assistentenseite (für den Rückweg vom Server).
     startseite: Mutex<Option<Url>>,
-    /// Anmeldung für die Datenauslieferung (CS4): Access-Token im Speicher,
-    /// Refresh-Token im Schlüsselbund.
+    /// Anmeldedienst (CS4, AD2): alle Tokens im Tresor des Konfigurationsordners.
     sitzung: Arc<anmeldung::Sitzung>,
     /// Loopback-Server für lokale Pakete (CS7).
     lokal: lokal::Lokal,
@@ -142,17 +142,27 @@ struct AnmeldeAnsicht {
     /// Der Server verlangt eine Anmeldung für die Daten.
     noetig: bool,
     angemeldet: bool,
-    /// Kontoname aus dem ID-Token, sobald in diesem Lauf ein Token vorlag.
+    /// Kontoname aus dem ID-Token.
     konto: Option<String>,
+    /// Offline-Token: Die Anmeldung hält wochenlang (AD2).
+    offline: bool,
+    angemeldet_seit: Option<u64>,
+    refresh_bis: Option<u64>,
+    /// Ablageort des Tresors (Konfigurationsordner).
+    tresor: PathBuf,
 }
 
 fn anmelde_ansicht(z: &AppZustand, k: &ClientKonfig) -> AnmeldeAnsicht {
     let noetig = k.daten.zugang == konfig::Zugang::Anmeldung;
-    let s = k.anmeldung.as_ref().map(|a| z.sitzung.status(a));
+    let s = k.anmeldung.as_ref().map(|a| z.sitzung.status(a)).unwrap_or_default();
     AnmeldeAnsicht {
         noetig,
-        angemeldet: s.as_ref().map(|s| s.angemeldet).unwrap_or(false),
-        konto: s.and_then(|s| s.konto),
+        angemeldet: s.angemeldet,
+        konto: s.konto,
+        offline: s.offline,
+        angemeldet_seit: s.angemeldet_seit,
+        refresh_bis: s.refresh_bis,
+        tresor: z.sitzung.tresor_pfad(),
     }
 }
 
@@ -187,11 +197,12 @@ async fn anmeldung_pruefen(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, F
     Ok(anmelde_ansicht(&z, &k))
 }
 
+/// Abmelden: Widerruf beim Anmeldedienst, Tresor löschen.
 #[tauri::command]
-fn abmelden(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
+async fn abmelden(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
     let k = aktive_konfig(&z)?;
     if let Some(a) = &k.anmeldung {
-        z.sitzung.abmelden(a)?;
+        z.sitzung.abmelden(&z.client, a).await?;
     }
     Ok(anmelde_ansicht(&z, &k))
 }
@@ -688,7 +699,10 @@ pub fn run() {
                 abbruch: Arc::new(AtomicBool::new(false)),
                 laeuft: Arc::new(AtomicBool::new(false)),
                 startseite: Mutex::new(None),
-                sitzung: Arc::new(anmeldung::Sitzung::neu(Arc::new(anmeldung::Schluesselbund))),
+                sitzung: Arc::new(anmeldung::Sitzung::neu(
+                    tresor::Tresor::neu(konfig_ordner(app.handle())?, tresor::Schluessel::Geraet),
+                    Arc::new(anmeldung::Schluesselbund),
+                )),
                 lokal,
                 update: Mutex::new(None),
                 argumente: vollbild::argumente(std::env::args().skip(1)),

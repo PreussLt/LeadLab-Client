@@ -1,6 +1,6 @@
 //! Einstellungen des Clients (eine JSON-Datei im Konfigurationsordner des
-//! Benutzers). Geheimnisse stehen hier nie — das Refresh-Token der
-//! Anmeldung liegt im Schlüsselbund des Betriebssystems (anmeldung.rs).
+//! Benutzers). Geheimnisse stehen hier nie — die Tokens der Anmeldung
+//! liegen verschlüsselt im Tresor daneben (tresor.rs).
 
 use std::path::{Path, PathBuf};
 

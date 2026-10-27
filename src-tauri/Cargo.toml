@@ -25,16 +25,24 @@ futures-util = "0.3"
 sha2 = "0.10"
 hex = "0.4"
 fs2 = "0.4"
-# Anmeldung (CS4, #759): PKCE, Systembrowser, Refresh-Token im Schlüsselbund
-# des Betriebssystems (Windows Credential Manager, Secret Service unter Linux).
+# Anmeldung (CS4, #759; AD2, #798): PKCE, Systembrowser, Tokens im
+# verschlüsselten Tresor des Konfigurationsordners (ChaCha20-Poly1305).
 base64 = "0.22"
+chacha20poly1305 = "0.10"
 getrandom = "0.3"
 open = "5"
 # Auto-Update (CS9, #764): Manifest kommt aus client_update der Konfigurationsadresse.
 tauri-plugin-updater = "2"
 # Loopback-Server (CS7, #762): PMTiles-Verzeichnisse und LoD2-Manifeste sind gzip.
 flate2 = "1"
+# Nur noch für die Übernahme eines Refresh-Tokens aus dem Schlüsselbund der
+# Fassung CS4 in den Tresor (AD2, #798); entfällt, wenn alle Arbeitsplätze
+# übernommen haben.
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
+
+# Geräteschlüssel des Tresors unter Windows: DPAPI im Nutzerbereich (AD2, #798).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 tempfile = "3"

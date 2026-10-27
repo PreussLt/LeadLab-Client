@@ -20,11 +20,22 @@ dieses Grundgerüst ist CS1 #756). Dort ist dieses Repo als Submodul
 2. **Anmeldung** (nur wenn der Server `zugang: anmeldung` meldet): Der Knopf
    öffnet den Systembrowser auf die Keycloak-Anmeldung des Servers
    (öffentlicher Client `leadlab-client`, Authorization Code + PKCE S256), der
-   Client wartet auf `http://127.0.0.1:<zufallsport>/rueckruf` (RFC 8252). Das
-   Refresh-Token liegt im Schlüsselbund des Betriebssystems (Windows
-   Credential Manager, Secret Service unter Linux), das Access-Token nur im
-   Speicher; vor jeder Datei holt der Downloader ein frisches. Das Token
-   öffnet nur `/daten/` des Servers, nicht die Übung.
+   Client wartet auf `http://127.0.0.1:<zufallsport>/rueckruf` (RFC 8252).
+   Angefragt wird zusätzlich `offline_access`: Die Anmeldung hält dann
+   wochenlang (Offline-Token, 30 Tage ohne Nutzung), bis jemand abmeldet oder
+   ein Admin die Offline-Sitzung in Keycloak widerruft. Access-, Refresh- und
+   ID-Token liegen mit ihren Ablaufzeiten verschlüsselt im **Tresor**
+   `tresor.bin` im Konfigurationsordner (`~/.config/de.leadlab.client`, unter
+   Windows `%APPDATA%\de.leadlab.client`), nicht im Datenordner:
+   ChaCha20-Poly1305 mit einem Geräteschlüssel in `tresor.schluessel`
+   (Windows: per DPAPI an das Nutzerkonto gebunden; Linux: Modus 0600). Eine
+   kaputte oder fremde Datei gilt als „nicht angemeldet“. Vor Ablauf erneuert
+   der Client das Access-Token per Refresh-Token und schreibt das Ergebnis
+   (auch ein rotiertes Refresh-Token) zurück; lehnt Keycloak ab, wird der
+   Tresor geleert. *Abmelden* widerruft das Refresh-Token beim Anmeldedienst
+   (RFC 7009) und löscht den Tresor. Ein Refresh-Token aus dem Schlüsselbund
+   älterer Fassungen wird beim ersten Start übernommen und dort gelöscht.
+   Vor jeder Datei holt der Downloader ein frisches Access-Token.
 3. **Daten:** Der Baum zeigt Region › Gruppe (Gelände, Karte, Luftbild,
    3D-Gebäude, Stammdaten) › Paket, jeweils mit Größe und Lizenz. Grundpakete
    einer gewählten Region sind gesetzt, Abhängigkeiten werden mitgenommen.
@@ -173,7 +184,8 @@ ein.
 | `src-tauri/src/katalog.rs` | Katalog, Auswahl auflösen, Plan gegen die Ablage |
 | `src-tauri/src/ablage.rs` | Datenordner, sichere Pfade, Zustand, freier Speicher |
 | `src-tauri/src/laden.rs` | Downloader mit Range, SHA-256 und Spiegeln |
-| `src-tauri/src/anmeldung.rs` | OIDC PKCE mit Loopback-Rückruf, Token im Schlüsselbund |
+| `src-tauri/src/anmeldung.rs` | OIDC PKCE mit Loopback-Rückruf, `offline_access`, Erneuerung, Widerruf, Übernahme aus dem Schlüsselbund |
+| `src-tauri/src/tresor.rs` | Verschlüsselter Token-Tresor im Konfigurationsordner (ChaCha20-Poly1305, DPAPI/0600) |
 | `src-tauri/src/aktualisierung.rs` | Update-Prüfung gegen `client_update` (tauri-plugin-updater) |
 | `werkzeug/update-manifest.mjs` | `latest.json` → `update.json` mit Adressen des eigenen Servers |
 | `src-tauri/src/lokal.rs` | Loopback-Server für lokale Pakete, Initialisierungsskript |
