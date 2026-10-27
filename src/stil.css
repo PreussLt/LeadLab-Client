@@ -2,13 +2,13 @@
  * Stil des Assistenten. Werte aus dem LeadLab-Hauptrepo übernommen:
  * Farb-Tokens aus apps/gemeinsam/src/basis.css (Kanal-Tripel, dunkel als
  * Vorgabe, hell über prefers-color-scheme), ffw-rot #CC0000 als Primärfarbe,
- * Jost für Text, IBM Plex Mono nur für codierte Werte (Adressen, Größen,
- * Versionen). Schriften lokal gebündelt — der Client lädt nichts aus dem Netz.
+ * Open Sans für Text (seit #830 im Hauptrepo, vorher Jost), IBM Plex Mono
+ * nur für codierte Werte (Adressen, Größen, Versionen). Schriften lokal gebündelt — der Client lädt nichts aus dem Netz.
  */
-@import '@fontsource/jost/400.css';
-@import '@fontsource/jost/500.css';
-@import '@fontsource/jost/600.css';
-@import '@fontsource/jost/700.css';
+@import '@fontsource/open-sans/400.css';
+@import '@fontsource/open-sans/500.css';
+@import '@fontsource/open-sans/600.css';
+@import '@fontsource/open-sans/700.css';
 @import '@fontsource/ibm-plex-mono/400.css';
 
 :root {
@@ -56,7 +56,7 @@ html, body { margin: 0; height: 100%; }
 body {
   background: rgb(var(--farbe-flaeche));
   color: rgb(var(--farbe-text));
-  font-family: 'Jost', system-ui, sans-serif;
+  font-family: 'Open Sans', system-ui, sans-serif;
   font-size: 16px;
   line-height: 1.5;
 }

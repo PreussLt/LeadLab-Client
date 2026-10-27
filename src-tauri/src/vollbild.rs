@@ -95,7 +95,7 @@ pub fn skript(ausgenommen: &[String]) -> String {
 var an=false,knopf=null;
 function raus(){{location.href={ziel};}}
 var STIL='position:fixed;right:16px;bottom:14px;z-index:2147483647;min-height:44px;padding:6px 14px;border-radius:8px;'+
-'font:500 13px Jost,system-ui,sans-serif;cursor:pointer;';
+'font:500 13px "Open Sans",system-ui,sans-serif;cursor:pointer;';
 function farbe(h){{knopf.style.background=h?'#cc0000':'rgba(17,24,39,0.88)';knopf.style.color=h?'#ffffff':'#9ca3af';
 knopf.style.border='1px solid '+(h?'#cc0000':'#1f2937');}}
 function zeige(){{if(!document.body){{document.addEventListener('DOMContentLoaded',zeige,{{once:true}});return;}}
