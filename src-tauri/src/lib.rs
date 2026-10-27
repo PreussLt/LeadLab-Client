@@ -12,6 +12,11 @@
 //! Oberfläche schaltet — je nach Einstellung oder `--vollbild`/`--fenster` —
 //! ins Vollbild ohne Menüleiste, auf `--monitor N` oder dem Monitor mit dem
 //! Mauszeiger. Ausstieg über F11/Esc und den Schwebeknopf (vollbild.rs).
+//!
+//! Ein Login für alles (AD4, #800): Vor dem Wechsel zur Oberfläche holt der
+//! Kern aus der Anmeldung des Clients eine BFF-Sitzung und setzt ihr Cookie
+//! ins Fenster (oberflaeche.rs), verlängert sie im Hintergrund und fängt
+//! Login-Umleitungen der Oberfläche ab.
 
 pub mod ablage;
 pub mod aktualisierung;
@@ -22,6 +27,7 @@ pub mod katalog;
 pub mod konfig;
 pub mod laden;
 pub mod lokal;
+pub mod oberflaeche;
 pub mod pmtiles;
 pub mod tresor;
 pub mod uebersicht;
@@ -70,6 +76,15 @@ struct AppZustand {
     /// Letztes Laden einer Server-Seite: (Adresse, Unix-Sekunden). Dort hat
     /// das Initialisierungsskript `window.__LEADLAB_CLIENT__` gesetzt.
     zuletzt_geladen: Mutex<Option<(String, u64)>>,
+    /// Sitzung der Oberfläche aus der Anmeldung des Clients (AD4).
+    bff: Mutex<Option<oberflaeche::BffSitzung>>,
+    /// Die Verlängerung im Hintergrund läuft.
+    verlaengerung: AtomicBool,
+    /// Zuletzt abgefangene Login-Umleitungen (gegen Kreisläufe).
+    umleitungen: Mutex<Vec<Instant>>,
+    /// Der Server hat die Sitzung beendet (Abmelden in der Oberfläche): die
+    /// nächste Login-Umleitung führt in den Assistenten.
+    serverseitig_beendet: AtomicBool,
 }
 
 fn jetzt() -> u64 {
@@ -150,6 +165,8 @@ struct AnmeldeAnsicht {
     refresh_bis: Option<u64>,
     /// Ablageort des Tresors (Konfigurationsordner).
     tresor: PathBuf,
+    /// Sitzung der Oberfläche im Fenster läuft bis (Unix-Sekunden, AD4).
+    oberflaeche_bis: Option<u64>,
 }
 
 fn anmelde_ansicht(z: &AppZustand, k: &ClientKonfig) -> AnmeldeAnsicht {
@@ -163,6 +180,7 @@ fn anmelde_ansicht(z: &AppZustand, k: &ClientKonfig) -> AnmeldeAnsicht {
         angemeldet_seit: s.angemeldet_seit,
         refresh_bis: s.refresh_bis,
         tresor: z.sitzung.tresor_pfad(),
+        oberflaeche_bis: z.bff.lock().unwrap().as_ref().map(|b| b.laeuft_bis),
     }
 }
 
@@ -197,13 +215,176 @@ async fn anmeldung_pruefen(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, F
     Ok(anmelde_ansicht(&z, &k))
 }
 
-/// Abmelden: Widerruf beim Anmeldedienst, Tresor löschen.
+/// Abmelden auf beiden Seiten (AD4): BFF-Sitzung beenden, Cookies im
+/// Fenster löschen, Widerruf beim Anmeldedienst, Tresor löschen.
 #[tauri::command]
-async fn abmelden(z: State<'_, AppZustand>) -> Result<AnmeldeAnsicht, Fehler> {
+async fn abmelden(app: AppHandle) -> Result<AnmeldeAnsicht, Fehler> {
+    abmelden_ueberall(&app).await?;
+    let z = app.state::<AppZustand>();
     let k = aktive_konfig(&z)?;
-    if let Some(a) = &k.anmeldung {
-        z.sitzung.abmelden(&z.client, a).await?;
+    Ok(anmelde_ansicht(&z, &k))
+}
+
+async fn abmelden_ueberall(app: &AppHandle) -> Result<bool, Fehler> {
+    let z = app.state::<AppZustand>();
+    let k = aktive_konfig(&z).ok();
+    let bff = z.bff.lock().unwrap().take();
+    let oberflaeche = k.as_ref().map(|k| k.oberflaeche.clone());
+    let fenster = app.get_webview_window("main");
+    let hosts = k.as_ref().map(oberflaechen_hosts).unwrap_or_default();
+    let loeschen = move || {
+        if let Some(w) = &fenster {
+            cookies_loeschen(w, &hosts);
+        }
+    };
+    let bff_ziel = match (&oberflaeche, &bff) {
+        (Some(o), Some(b)) => Some((o, b.wert.as_str())),
+        _ => None,
+    };
+    oberflaeche::abmelden_beidseitig(&z.client, bff_ziel, loeschen, &z.sitzung, k.as_ref().and_then(|k| k.anmeldung.as_ref())).await
+}
+
+/// Oberfläche und Startzentrale des Servers (für Cookies und das Abfangen).
+fn oberflaechen_hosts(k: &ClientKonfig) -> Vec<Url> {
+    let mut v = vec![k.oberflaeche.clone()];
+    if let Some(s) = &k.startzentrale {
+        v.push(s.clone());
     }
+    v
+}
+
+fn cookies_loeschen(w: &tauri::WebviewWindow, hosts: &[Url]) {
+    for h in hosts {
+        for c in w.cookies_for_url(oberflaeche::wurzel(h)).unwrap_or_default() {
+            if c.name() == oberflaeche::SITZUNGS_COOKIE {
+                let _ = w.delete_cookie(c);
+            }
+        }
+    }
+}
+
+/// Was die Übernahme der Anmeldung ergab.
+enum Uebernahme {
+    /// Cookie steht im Fenster.
+    Gesetzt,
+    /// `set_cookie` griff nicht: über den Einmalcode navigieren.
+    Einmalcode(String),
+    /// Der Server nennt keinen Anmeldedienst: die Oberfläche meldet sich selbst an.
+    OhneAnmeldedienst,
+    /// Der Client ist nicht (mehr) angemeldet.
+    NichtAngemeldet,
+}
+
+/// Anmeldung des Clients in die Oberfläche übernehmen: frisches Token, BFF-
+/// Sitzung holen (die bestehende verlängern), Cookie ins Fenster setzen und
+/// nachsehen, ob es dort angekommen ist.
+async fn sitzung_uebernehmen(app: &AppHandle) -> Result<Uebernahme, Fehler> {
+    let z = app.state::<AppZustand>();
+    let k = aktive_konfig(&z)?;
+    let Some(a) = k.anmeldung.clone() else { return Ok(Uebernahme::OhneAnmeldedienst) };
+    let Some(token) = z.sitzung.token(&z.client, &a).await? else {
+        *z.bff.lock().unwrap() = None;
+        return Ok(Uebernahme::NichtAngemeldet);
+    };
+    let alt = z.bff.lock().unwrap().as_ref().map(|b| b.wert.clone());
+    let s = oberflaeche::sitzung_holen(&z.client, &k.oberflaeche, &token, alt.as_deref()).await?;
+    let hosts = oberflaechen_hosts(&k);
+    let w = app.get_webview_window("main").ok_or_else(|| Fehler::Eingabe("Hauptfenster fehlt.".into()))?;
+    let host_refs: Vec<&Url> = hosts.iter().collect();
+    for c in oberflaeche::cookies_fuer(&s.cookie, &host_refs) {
+        if let Err(e) = w.set_cookie(c) {
+            eprintln!("LeadLab-Client: Cookie nicht gesetzt ({e})");
+        }
+    }
+    let angekommen = w
+        .cookies_for_url(oberflaeche::wurzel(&k.oberflaeche))
+        .map(|alle| alle.iter().any(|c| c.name() == oberflaeche::SITZUNGS_COOKIE && c.value() == s.wert))
+        .unwrap_or(false);
+    let code = s.einmalcode.clone();
+    *z.bff.lock().unwrap() = Some(s);
+    verlaengerung_starten(app);
+    Ok(if angekommen { Uebernahme::Gesetzt } else { Uebernahme::Einmalcode(code) })
+}
+
+/// Hält die BFF-Sitzung frisch, solange es eine gibt (AD4): kurz vor
+/// `laeuft_bis` mit einem frischen Token und dem Cookie verlängern. Endet,
+/// wenn der Client abgemeldet ist oder der Server die Sitzung beendet hat
+/// (Abmelden in der Oberfläche) — dann bleibt das Fenster, wie es ist, und
+/// die nächste Login-Umleitung führt in den Assistenten.
+fn verlaengerung_starten(app: &AppHandle) {
+    let z = app.state::<AppZustand>();
+    if z.verlaengerung.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let bis = app.state::<AppZustand>().bff.lock().unwrap().as_ref().map(|b| b.laeuft_bis);
+            let Some(bis) = bis else { break };
+            let warten = oberflaeche::verlaengern_um(bis, jetzt()).saturating_sub(jetzt());
+            tokio::time::sleep(Duration::from_secs(warten)).await;
+            if !verlaengern(&app).await {
+                break;
+            }
+        }
+        app.state::<AppZustand>().verlaengerung.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Ein Verlängerungsschritt; `false` beendet die Schleife.
+async fn verlaengern(app: &AppHandle) -> bool {
+    let z = app.state::<AppZustand>();
+    let Some(alt) = z.bff.lock().unwrap().clone() else { return false };
+    let Ok(k) = aktive_konfig(&z) else { return false };
+    let Some(a) = k.anmeldung.clone() else { return false };
+    let token = match z.sitzung.token(&z.client, &a).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            *z.bff.lock().unwrap() = None;
+            return false;
+        }
+        Err(_) => return true, // Netz weg: gleich noch einmal
+    };
+    match oberflaeche::sitzung_holen(&z.client, &k.oberflaeche, &token, Some(&alt.wert)).await {
+        Ok(neu) if oberflaeche::vom_server_beendet(&alt, &neu, jetzt()) => {
+            // Abgemeldet in der Oberfläche: die eben angelegte Sitzung gleich wieder weg.
+            let _ = oberflaeche::bff_abmelden(&z.client, &k.oberflaeche, &neu.wert).await;
+            *z.bff.lock().unwrap() = None;
+            z.serverseitig_beendet.store(true, Ordering::SeqCst);
+            false
+        }
+        Ok(neu) => {
+            if neu.wert != alt.wert {
+                // Abgelaufen (Ruhezustand): das neue Cookie ins Fenster.
+                if let Some(w) = app.get_webview_window("main") {
+                    let hosts = oberflaechen_hosts(&k);
+                    let refs: Vec<&Url> = hosts.iter().collect();
+                    for c in oberflaeche::cookies_fuer(&neu.cookie, &refs) {
+                        let _ = w.set_cookie(c);
+                    }
+                }
+            }
+            *z.bff.lock().unwrap() = Some(neu);
+            true
+        }
+        Err(Fehler::Netz(_)) => true,
+        Err(_) => {
+            *z.bff.lock().unwrap() = None;
+            false
+        }
+    }
+}
+
+/// „Sitzung in der Oberfläche erneuern“ auf der Einstellungsseite.
+#[tauri::command]
+async fn oberflaeche_sitzung_erneuern(app: AppHandle) -> Result<AnmeldeAnsicht, Fehler> {
+    match sitzung_uebernehmen(&app).await? {
+        Uebernahme::NichtAngemeldet => return Err(Fehler::Eingabe("Der Client ist nicht angemeldet.".into())),
+        Uebernahme::OhneAnmeldedienst => return Err(Fehler::Eingabe("Der Server nennt keinen Anmeldedienst.".into())),
+        Uebernahme::Gesetzt | Uebernahme::Einmalcode(_) => {}
+    }
+    let z = app.state::<AppZustand>();
+    let k = aktive_konfig(&z)?;
     Ok(anmelde_ansicht(&z, &k))
 }
 
@@ -495,25 +676,98 @@ fn ordner_oeffnen(app: AppHandle, welcher: String, z: State<'_, AppZustand>) -> 
     open::that_detached(&ordner).map_err(|e| Fehler::Eingabe(format!("Ordner lässt sich nicht öffnen ({e}).")))
 }
 
+/// Zur Oberfläche — mit der Anmeldung des Clients (AD4). Async: Cookies
+/// lesen und setzen darf unter WebView2 nicht im Hauptthread warten.
 #[tauri::command]
-fn oberflaeche_oeffnen(app: AppHandle, z: State<'_, AppZustand>) -> Result<(), Fehler> {
-    let (ziel, einstellung) = {
+async fn oberflaeche_oeffnen(app: AppHandle) -> Result<(), Fehler> {
+    oeffnen_nach(&app, None).await
+}
+
+async fn oeffnen_nach(app: &AppHandle, ziel: Option<Url>) -> Result<(), Fehler> {
+    let z = app.state::<AppZustand>();
+    let (start, einstellung) = {
         let e = z.einstellungen.lock().unwrap();
-        let ziel = e
+        let start = e
             .konfig
             .as_ref()
             .map(|k| k.oberflaeche.clone())
             .ok_or_else(|| Fehler::Eingabe("Noch kein Server eingerichtet.".into()))?;
-        (ziel, e.vollbild)
+        (start, e.vollbild)
     };
+    let ziel = ziel.unwrap_or(start.clone());
     // Nur der Übergang Assistent → Oberfläche schaltet ins Vollbild; wer auf
     // der Oberfläche „LeadLab öffnen“ wählt, behält seinen Fensterzustand.
-    let vom_assistenten = auf_startseite(&app, &z);
-    navigiere(&app, ziel)?;
+    let vom_assistenten = auf_startseite(app, &z);
+    // Ausdrücklich geöffnet: eine frühere Abmeldung in der Oberfläche ist erledigt.
+    z.serverseitig_beendet.store(false, Ordering::SeqCst);
+    match sitzung_uebernehmen(app).await {
+        Ok(Uebernahme::Gesetzt | Uebernahme::OhneAnmeldedienst) => navigiere(app, ziel)?,
+        Ok(Uebernahme::Einmalcode(code)) => navigiere(app, oberflaeche::client_login_url(&start, &code, &ziel))?,
+        Ok(Uebernahme::NichtAngemeldet) => {
+            // Statt der Keycloak-Seite im Fenster: die Anmeldung des Clients.
+            zurueck_zum_assistenten(app, "anmeldung");
+            return Ok(());
+        }
+        Err(e) => {
+            if vom_assistenten {
+                return Err(e);
+            }
+            zurueck_zum_assistenten(app, "anmeldung");
+            return Ok(());
+        }
+    }
     if vom_assistenten && vollbild::im_vollbild(&z.argumente, einstellung) {
-        vollbild_setzen(&app, true);
+        vollbild_setzen(app, true);
     }
     Ok(())
+}
+
+/// Die Oberfläche wollte auf `/api/auth/login` (AD4): Sitzung erneuern und
+/// zum Ziel.
+///
+/// - Lief die alte Sitzung noch und der Server gibt trotzdem eine neue aus,
+///   hat er sie beendet (Abmelden in der Oberfläche, Admin): zurück in den
+///   Assistenten, nicht still neu anmelden.
+/// - Kommt dasselbe Cookie zurück, lebt die Sitzung — dann hat das Fenster
+///   das Cookie nicht angenommen, und es geht über den Einmalcode.
+/// - Mehr als drei Umleitungen in 30 s führen in den Assistenten statt im Kreis.
+async fn login_abgefangen(app: AppHandle, ziel: Url) {
+    let z = app.state::<AppZustand>();
+    let anlaeufe = {
+        let mut u = z.umleitungen.lock().unwrap();
+        u.retain(|t| t.elapsed() < Duration::from_secs(30));
+        u.push(Instant::now());
+        u.len()
+    };
+    let Ok(k) = aktive_konfig(&z) else { return };
+    if anlaeufe > 3 || z.serverseitig_beendet.swap(false, Ordering::SeqCst) {
+        zurueck_zum_assistenten(&app, "anmeldung");
+        return;
+    }
+    let alt = z.bff.lock().unwrap().clone();
+    let ergebnis = sitzung_uebernehmen(&app).await;
+    let neu = z.bff.lock().unwrap().clone();
+    match (ergebnis, neu) {
+        (Ok(u @ (Uebernahme::Gesetzt | Uebernahme::Einmalcode(_))), Some(neu)) => {
+            if alt.as_ref().map(|a| oberflaeche::vom_server_beendet(a, &neu, jetzt())).unwrap_or(false) {
+                let _ = oberflaeche::bff_abmelden(&z.client, &k.oberflaeche, &neu.wert).await;
+                *z.bff.lock().unwrap() = None;
+                if let Some(w) = app.get_webview_window("main") {
+                    cookies_loeschen(&w, &oberflaechen_hosts(&k));
+                }
+                zurueck_zum_assistenten(&app, "anmeldung");
+                return;
+            }
+            let ueber_code = matches!(u, Uebernahme::Einmalcode(_))
+                || alt.map(|a| a.wert == neu.wert).unwrap_or(false)
+                || anlaeufe >= 2;
+            let adresse = if ueber_code { oberflaeche::client_login_url(&k.oberflaeche, &neu.einmalcode, &ziel) } else { ziel };
+            if navigiere(&app, adresse).is_err() {
+                zurueck_zum_assistenten(&app, "anmeldung");
+            }
+        }
+        _ => zurueck_zum_assistenten(&app, "anmeldung"),
+    }
 }
 
 /// Zeigt das Hauptfenster gerade die lokale Assistentenseite?
@@ -632,6 +886,19 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
                 tauri::async_runtime::spawn(async move { vollbild_setzen(&h, false) });
                 return false;
             }
+            // Login-Umleitung der eigenen Oberfläche (AD4): Der Client meldet
+            // an, nicht Keycloak im Fenster. Ohne Anmeldedienst läuft sie normal.
+            if let Some(z) = handle.try_state::<AppZustand>() {
+                let k = z.einstellungen.lock().unwrap().konfig.clone();
+                if let Some(k) = k.filter(|k| k.anmeldung.is_some()) {
+                    let hosts = oberflaechen_hosts(&k);
+                    let refs: Vec<&Url> = hosts.iter().collect();
+                    if let Some(ziel) = oberflaeche::login_ziel(u, &refs) {
+                        tauri::async_runtime::spawn(login_abgefangen(handle.clone(), ziel));
+                        return false;
+                    }
+                }
+            }
             true
         })
         // Nach jedem Laden erfährt die Seite, ob sie im Vollbild steht.
@@ -657,6 +924,7 @@ fn menue(app: &AppHandle, vollbild_start: bool) -> tauri::Result<Menu<tauri::Wry
     let daten = MenuItem::with_id(app, "daten", "Daten verwalten …", true, None::<&str>)?;
     let einstellungen = MenuItem::with_id(app, "einstellungen", "Einstellungen …", true, Some("CmdOrCtrl+,"))?;
     let server = MenuItem::with_id(app, "server", "Server wechseln …", true, None::<&str>)?;
+    let abmelden = MenuItem::with_id(app, "abmelden", "Abmelden", true, None::<&str>)?;
     let oberflaeche = MenuItem::with_id(app, "oberflaeche", "LeadLab öffnen", true, None::<&str>)?;
     let vollbild = MenuItem::with_id(app, "vollbild", "Vollbild ein/aus", true, Some("F11"))?;
     let beim_start =
@@ -668,7 +936,7 @@ fn menue(app: &AppHandle, vollbild_start: bool) -> tauri::Result<Menu<tauri::Wry
         "LeadLab",
         true,
         &[&oberflaeche, &neu, &vollbild, &beim_start, &PredefinedMenuItem::separator(app)?, &einstellungen, &daten, &server,
-          &PredefinedMenuItem::separator(app)?, &beenden],
+          &abmelden, &PredefinedMenuItem::separator(app)?, &beenden],
     )?;
     Menu::with_items(app, &[&leadlab])
 }
@@ -709,6 +977,10 @@ pub fn run() {
                 vollbild_seit: Mutex::new(None),
                 update_info: Mutex::new(None),
                 zuletzt_geladen: Mutex::new(None),
+                bff: Mutex::new(None),
+                verlaengerung: AtomicBool::new(false),
+                umleitungen: Mutex::new(Vec::new()),
+                serverseitig_beendet: AtomicBool::new(false),
             });
             if let Some(w) = app.get_webview_window("main") {
                 *app.state::<AppZustand>().startseite.lock().unwrap() = w.url().ok();
@@ -719,7 +991,15 @@ pub fn run() {
                 "einstellungen" => zurueck_zum_assistenten(app, "einstellungen"),
                 "server" => zurueck_zum_assistenten(app, "server"),
                 "oberflaeche" => {
-                    let _ = oberflaeche_oeffnen(app.clone(), app.state());
+                    let h = app.clone();
+                    tauri::async_runtime::spawn(async move { let _ = oeffnen_nach(&h, None).await; });
+                }
+                "abmelden" => {
+                    let h = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = abmelden_ueberall(&h).await;
+                        zurueck_zum_assistenten(&h, "anmeldung");
+                    });
                 }
                 "neu_laden" => {
                     if let Some(w) = app.get_webview_window("main") {
@@ -751,7 +1031,8 @@ pub fn run() {
             zustand_uebersicht,
             konfig_neu_pruefen,
             paket_entfernen,
-            ordner_oeffnen
+            ordner_oeffnen,
+            oberflaeche_sitzung_erneuern
         ])
         .run(tauri::generate_context!())
         .expect("LeadLab-Client konnte nicht starten");

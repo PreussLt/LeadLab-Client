@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import katalogJson from '../../schema/beispiel-katalog.json'
 import konfigJson from '../../schema/beispiel-leadlab-client.json'
-import { type ClientKonfig, type Katalog, anmeldungNoetig, aufgeloest, baum, gesamt, gesperrt, groesse, nachServer, umschalten, vorauswahl } from '../logik'
+import { type ClientKonfig, type Katalog, anmeldungAngeboten, anmeldungNoetig, aufgeloest, baum, gesamt, gesperrt, groesse, nachServer, restdauer, umschalten, vorauswahl } from '../logik'
 
 const k = katalogJson as unknown as Katalog
 const konfig = konfigJson as unknown as ClientKonfig
@@ -72,10 +72,28 @@ describe('Anmeldung (CS4)', () => {
     expect(anmeldungNoetig(k)).toBe(true)
     expect(nachServer(k)).toBe('anmeldung')
   })
-  it('überspringt sie bei zugang=offen und ohne Server', () => {
+  it('bietet sie bei zugang=offen an, wenn der Server einen Anmeldedienst nennt (AD4: ein Login auch für die Oberfläche)', () => {
     const offen = { ...k, daten: { ...k.daten, zugang: 'offen' as const } }
     expect(anmeldungNoetig(offen)).toBe(false)
-    expect(nachServer(offen)).toBe('daten')
+    expect(anmeldungAngeboten(offen)).toBe(true)
+    expect(nachServer(offen)).toBe('anmeldung')
+  })
+  it('überspringt sie ohne Anmeldedienst und ohne Server', () => {
+    const ohne = { ...k, anmeldung: null, daten: { ...k.daten, zugang: 'offen' as const } }
+    expect(anmeldungAngeboten(ohne)).toBe(false)
+    expect(nachServer(ohne)).toBe('daten')
     expect(nachServer(null)).toBe('daten')
+  })
+})
+
+describe('restdauer', () => {
+  it('nennt die größte sinnvolle Einheit', () => {
+    const jetzt = 1_800_000_000
+    expect(restdauer(jetzt + 30 * 86400, jetzt)).toBe('noch 30 Tage')
+    expect(restdauer(jetzt + 5 * 3600, jetzt)).toBe('noch 5 Stunden')
+    expect(restdauer(jetzt + 240, jetzt)).toBe('noch 4 Minuten')
+    expect(restdauer(jetzt + 1, jetzt)).toBe('noch 1 Sekunde')
+    expect(restdauer(jetzt - 1, jetzt)).toBe('abgelaufen')
+    expect(restdauer(null, jetzt)).toBe('–')
   })
 })

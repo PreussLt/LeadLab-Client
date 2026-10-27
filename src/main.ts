@@ -15,8 +15,8 @@ import { listen } from '@tauri-apps/api/event'
 import {
   type Auswahl, type ClientKonfig, type Katalog,
   type PaketZeile,
-  aktualisierungen, anmeldungNoetig, aufgeloest, baum, gesamt, gesperrt, groesse, gruppenTitel, nachServer, paketBytes,
-  paketTabelle, startverhalten, summeBytes, umschalten, vorauswahl, zeitpunkt, zoomText,
+  aktualisierungen, anmeldungAngeboten, aufgeloest, baum, gesamt, gesperrt, groesse, gruppenTitel, nachServer, paketBytes,
+  paketTabelle, restdauer, startverhalten, summeBytes, umschalten, vorauswahl, zeitpunkt, zoomText,
 } from './logik'
 
 type Schritt = 'start' | 'server' | 'anmeldung' | 'daten' | 'ort' | 'laden' | 'fertig' | 'einstellungen'
@@ -29,7 +29,12 @@ interface StartInfo {
 }
 interface Plan { pakete: string[]; laden: { pfad: string; bytes: number }[]; loeschen: string[]; bytes_gesamt: number; bytes_zu_laden: number; unbekannt: string[] }
 interface UpdateInfo { verfuegbar: boolean; version?: string | null; notizen?: string | null; hinweis?: string | null }
-interface Anmeldestand { noetig: boolean; angemeldet: boolean; konto?: string | null }
+/** Spiegelt `AnmeldeAnsicht` in lib.rs (AD2/AD4). */
+interface Anmeldestand {
+  noetig: boolean; angemeldet: boolean; konto?: string | null
+  offline?: boolean; angemeldet_seit?: number | null; refresh_bis?: number | null
+  tresor?: string | null; oberflaeche_bis?: number | null
+}
 /** Spiegelt `Uebersicht` in lib.rs. */
 interface Uebersicht {
   einstellungen: StartInfo['einstellungen'] & { konfig_geprueft?: number | null; vollbild?: boolean }
@@ -65,14 +70,16 @@ const z = {
   beschaeftigt: false,
   fehler: '' as string,
   hinweis: '' as string,
-  /** Anmeldung für die Daten (CS4): null = noch nicht abgefragt. */
-  anmeldung: null as { noetig: boolean; angemeldet: boolean } | null,
+  /** Anmeldung des Clients (CS4, AD4): null = noch nicht abgefragt. */
+  anmeldung: null as Anmeldestand | null,
   /** Update des Clients (CS9): Ergebnis der letzten Prüfung. */
   update: null as UpdateInfo | null,
   /** Konfigurationsmodus (#792). */
   uebersicht: null as Uebersicht | null,
   /** Paket-Id, deren Entfernen gerade bestätigt werden soll. */
   entfernen: null as string | null,
+  /** Ergebnis von „Sitzung in der Oberfläche erneuern“ (AD4). */
+  sitzungHinweis: '' as string,
   /** Ergebnis von „Auf Aktualisierungen prüfen“. */
   aktualisierung: null as { offen: boolean; text: string } | null,
 }
@@ -116,7 +123,7 @@ async function schritt(s: Schritt) {
 
 async function anmeldungAbfragen() {
   try {
-    z.anmeldung = await invoke<{ noetig: boolean; angemeldet: boolean }>('anmeldung_status')
+    z.anmeldung = await invoke<Anmeldestand>('anmeldung_status')
   } catch (e) {
     z.fehler = fehlerText(e)
   }
@@ -126,7 +133,7 @@ async function anmeldungAbfragen() {
 async function anmelden() {
   z.beschaeftigt = true; z.fehler = ''; zeichne()
   try {
-    z.anmeldung = await invoke<{ noetig: boolean; angemeldet: boolean }>('anmelden')
+    z.anmeldung = await invoke<Anmeldestand>('anmelden')
     z.katalog = null
   } catch (e) {
     z.fehler = fehlerText(e)
@@ -137,7 +144,7 @@ async function anmelden() {
 
 async function abmelden() {
   try {
-    z.anmeldung = await invoke<{ noetig: boolean; angemeldet: boolean }>('abmelden')
+    z.anmeldung = await invoke<Anmeldestand>('abmelden')
     z.katalog = null
   } catch (e) {
     z.fehler = fehlerText(e)
@@ -304,6 +311,11 @@ const konfigNeuPruefen = () => versuche(async () => {
 })
 const einstellungAnmelden = () => versuche(async () => { await invoke('anmelden'); z.katalog = null })
 const einstellungAbmelden = () => versuche(async () => { await invoke('abmelden'); z.katalog = null })
+const sitzungErneuern = () => versuche(async () => {
+  z.sitzungHinweis = ''
+  await invoke('oberflaeche_sitzung_erneuern')
+  z.sitzungHinweis = 'Die Sitzung in der Oberfläche ist erneuert.'
+})
 const ordnerOeffnen = (welcher: 'daten' | 'einstellungen') => versuche(() => invoke('ordner_oeffnen', { welcher }))
 const paketEntfernen = (id: string) => versuche(async () => {
   z.entfernen = null
@@ -427,14 +439,18 @@ function ansichtServer(): HTMLElement {
 
 function ansichtAnmeldung(): HTMLElement {
   const a = z.anmeldung
+  const eingerichtet = !!z.info?.einstellungen.eingerichtet
   return h('section', { class: 'inhalt' },
-    h('h1', {}, 'Anmelden für die Daten'),
+    h('h1', {}, 'Anmelden'),
     h('p', { class: 'einleitung' },
-      'Dieser Server gibt seine Datenpakete nur nach einer Anmeldung heraus. Der Knopf öffnet die Anmeldeseite im Browser; danach geht es hier weiter. ',
-      'Die Anmeldung gilt nur für die Daten — in LeadLab selbst melden Sie sich wie gewohnt an.'),
+      'Melden Sie sich einmal im Client an. Die Anmeldung gilt für die Datenpakete und für LeadLab im Fenster — ein zweites Login gibt es nicht. ',
+      'Sie hält wochenlang, bis jemand hier abmeldet oder die Verwaltung den Arbeitsplatz in der Anmeldung sperrt. Der Knopf öffnet die Anmeldeseite im Browser; danach geht es hier weiter.'),
     h('div', { class: 'panel' },
       a?.angemeldet
-        ? h('p', { class: 'meldung ok' }, 'Angemeldet. Die Anmeldung bleibt im Schlüsselbund dieses Rechners gespeichert.')
+        ? h('p', { class: 'meldung ok' },
+          a.konto ? `Angemeldet als ${a.konto}. ` : 'Angemeldet. ',
+          'Die Anmeldung liegt verschlüsselt auf diesem Rechner.',
+          a.offline === false ? ' Dieses Konto darf keine Daueranmeldung; sie endet mit der Anmeldesitzung des Servers.' : null)
         : z.beschaeftigt
           ? h('p', {}, h('span', { class: 'dreht', 'aria-hidden': 'true' }), ' Warte auf die Anmeldung im Browser …')
           : h('p', { class: 'nebentext' }, 'Noch nicht angemeldet.'),
@@ -445,7 +461,9 @@ function ansichtAnmeldung(): HTMLElement {
       a?.angemeldet
         ? h('button', { class: 'sekundaer', onclick: abmelden }, 'Abmelden')
         : h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: anmelden }, 'Im Browser anmelden'),
-      h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: () => schritt('daten') }, 'Weiter'),
+      eingerichtet
+        ? h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: oeffnen }, 'LeadLab öffnen')
+        : h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: () => schritt('daten') }, 'Weiter'),
     ),
   )
 }
@@ -458,7 +476,7 @@ function ansichtDaten(): HTMLElement {
       z.beschaeftigt ? h('p', {}, h('span', { class: 'dreht', 'aria-hidden': 'true' }), ' Datenkatalog wird geladen') : null,
       fehlerFeld(),
       !z.beschaeftigt && h('div', { class: 'knoepfe' },
-        h('button', { class: 'sekundaer links', onclick: () => schritt(anmeldungNoetig(z.konfig) ? 'anmeldung' : 'server') }, 'Zurück'),
+        h('button', { class: 'sekundaer links', onclick: () => schritt(anmeldungAngeboten(z.konfig) ? 'anmeldung' : 'server') }, 'Zurück'),
         h('button', { class: 'sekundaer', onclick: ohneDatenWeiter }, 'Ohne lokale Daten weiter'),
         h('button', { class: 'primaer', onclick: katalogLaden }, 'Erneut versuchen'),
       ))
@@ -502,7 +520,7 @@ function ansichtDaten(): HTMLElement {
     summe(),
     fehlerFeld(),
     h('div', { class: 'knoepfe' },
-      h('button', { class: 'sekundaer links', onclick: () => schritt(anmeldungNoetig(z.konfig) ? 'anmeldung' : 'server') }, 'Zurück'),
+      h('button', { class: 'sekundaer links', onclick: () => schritt(anmeldungAngeboten(z.konfig) ? 'anmeldung' : 'server') }, 'Zurück'),
       h('button', { class: 'primaer', onclick: () => schritt('ort') }, 'Weiter'),
     ),
   )
@@ -625,16 +643,25 @@ function ansichtEinstellungen(): HTMLElement {
       !a || (!a.noetig && !k?.anmeldung)
         ? h('p', { class: 'nebentext' }, 'Dieser Server gibt seine Daten ohne Anmeldung heraus.')
         : h('div', {},
+          h('p', { class: 'nebentext' }, 'Eine Anmeldung für Daten und Oberfläche. Sie liegt verschlüsselt im Tresor dieses Rechners.'),
           h('dl', { class: 'server-karte' },
             ...eintrag('Angemeldet', a.angemeldet ? 'ja' : 'nein'),
             ...eintrag('Konto', a.angemeldet ? (a.konto ?? 'wird beim nächsten Datenabruf bekannt') : null),
+            ...eintrag('Angemeldet seit', a.angemeldet ? zeitpunkt(a.angemeldet_seit) : null, true),
+            ...eintrag('Daueranmeldung', a.angemeldet ? (a.offline ? 'ja (Offline-Token)' : 'nein') : null),
+            ...eintrag('Läuft ab', a.angemeldet && a.refresh_bis
+              ? `${zeitpunkt(a.refresh_bis)} · ${restdauer(a.refresh_bis)}${a.offline ? ', rückt mit jeder Nutzung vor' : ''}` : null, true),
+            ...eintrag('Sitzung in der Oberfläche', a.oberflaeche_bis ? `bis ${zeitpunkt(a.oberflaeche_bis)}, verlängert sich selbst` : (a.angemeldet ? 'beim Öffnen von LeadLab' : null), !!a.oberflaeche_bis),
             ...eintrag('Für die Daten nötig', a.noetig ? 'ja' : 'nein'),
+            ...eintrag('Tresor', a.tresor, true),
           ),
+          z.sitzungHinweis ? h('p', { class: 'meldung ok', role: 'status' }, z.sitzungHinweis) : null,
           h('div', { class: 'knoepfe' },
             a.angemeldet
               ? h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: einstellungAbmelden }, 'Abmelden')
               : h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: einstellungAnmelden },
                 z.beschaeftigt ? 'Warte auf den Browser …' : 'Im Browser anmelden'),
+            a.angemeldet && h('button', { class: 'sekundaer', disabled: z.beschaeftigt || !k, onclick: sitzungErneuern }, 'Sitzung in der Oberfläche erneuern'),
           )),
     ),
 
@@ -781,13 +808,15 @@ async function start() {
   // Assistent schon da, lädt sie nicht neu.
   window.addEventListener('hashchange', () => {
     const f = location.hash.replace('#', '')
-    if (f === 'server' || f === 'einstellungen' || (f === 'daten' && z.konfig)) void schritt(f as Schritt)
+    if (f === 'server' || f === 'einstellungen' || ((f === 'daten' || f === 'anmeldung') && z.konfig)) void schritt(f as Schritt)
   })
 
   const ziel = location.hash.replace('#', '')
   if (ziel === 'server') return schritt('server')
   if (ziel === 'einstellungen' && e.konfig) return schritt('einstellungen')
   if (ziel === 'daten' && e.konfig) return schritt('daten')
+  // Aus der Oberfläche zurück, weil die Anmeldung fehlt (AD4) oder über „Abmelden“ im Menü.
+  if (ziel === 'anmeldung' && e.konfig) return schritt('anmeldung')
   if (e.eingerichtet && e.konfig_adresse) { z.schritt = 'start'; return automatischStarten() }
   return schritt('server')
 }

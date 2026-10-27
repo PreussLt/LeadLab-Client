@@ -17,7 +17,8 @@ dieses Grundgerüst ist CS1 #756). Dort ist dieses Repo als Submodul
    `https://<adresse>/.well-known/leadlab-client.json` (oder direkt eine
    angegebene `.json`) und zeigt Name, Landkreis, Version und Datenzugang.
    `http://` gilt nur für `localhost`, `lead.lab` und private Adressen.
-2. **Anmeldung** (nur wenn der Server `zugang: anmeldung` meldet): Der Knopf
+2. **Anmeldung** (wenn der Server einen Anmeldedienst nennt): Ein Login gilt
+   für die Datenpakete **und** für die Oberfläche im Fenster. Der Knopf
    öffnet den Systembrowser auf die Keycloak-Anmeldung des Servers
    (öffentlicher Client `leadlab-client`, Authorization Code + PKCE S256), der
    Client wartet auf `http://127.0.0.1:<zufallsport>/rueckruf` (RFC 8252).
@@ -64,9 +65,41 @@ In jede Seite außer der Assistentenseite spritzt der Client
 `window.__LEADLAB_CLIENT__ = { version, lokal, pakete }` ein (eingefroren).
 Die Frontend-Weiche der Oberfläche liest daraus die lokale Adresse
 (Hauptrepo CS8 #763). IPC-Rechte bekommt die entfernte Seite weiterhin nicht. Das Menü
-**LeadLab** bietet *Daten verwalten*, *Server wechseln*, *Neu laden* (F5),
-*Vollbild ein/aus* (F11), *Beim Start im Vollbild* und *Einstellungen …*
-(Strg+,).
+**LeadLab** bietet *Daten verwalten*, *Server wechseln*, *Abmelden*, *Neu
+laden* (F5), *Vollbild ein/aus* (F11), *Beim Start im Vollbild* und
+*Einstellungen …* (Strg+,).
+
+## Ein Login für Daten und Oberfläche
+
+Die Oberfläche im Fenster übernimmt die Anmeldung des Clients
+(`oberflaeche.rs`, Hauptrepo AD4 #800), es erscheint kein zweites Login:
+
+1. Vor dem Öffnen (auch beim automatischen Start) holt der Kern ein frisches
+   Access-Token aus dem Tresor und ruft `POST <oberfläche>/api/auth/client-sitzung`
+   auf. Der Server tauscht es bei Keycloak und antwortet mit dem Cookie
+   `leadlab_sitzung`.
+2. Das Cookie setzt der Kern per `set_cookie` ins Fenster (mit Domain aus der
+   Antwort, sonst je Host für Oberfläche und Startzentrale) und prüft mit
+   `cookies_for_url`, dass es angekommen ist. Erst dann navigiert er. Kommt
+   es nicht an, geht es über den Einmalcode:
+   `GET /api/auth/client-login?code=…&ziel=…` setzt das Cookie in einer
+   gewöhnlichen Antwort.
+3. Die Sitzung der Oberfläche läuft fünf Minuten; der Kern verlängert sie
+   90 s vor Ablauf mit dem Cookie (dieselbe Sitzung).
+4. Navigiert die Oberfläche auf `/api/auth/login` (Sitzung abgelaufen, etwa
+   nach dem Ruhezustand), fängt `on_navigation` das ab, erneuert die Sitzung
+   und geht zum ursprünglichen Ziel. Ist der Client nicht mehr angemeldet
+   (Offline-Token widerrufen), kommt der Assistentenschritt *Anmeldung* statt
+   der Keycloak-Seite. Mehr als drei Umleitungen in 30 s führen ebenfalls
+   dorthin, statt im Kreis.
+5. *Abmelden* (Menü, Einstellungen, Assistent) beendet zuerst die Sitzung beim
+   Server (`POST /api/auth/abmelden` mit dem Cookie), löscht dann die Cookies
+   im Fenster und widerruft zuletzt das Refresh-Token beim Anmeldedienst
+   (Tresor gelöscht). Wer in der Oberfläche selbst abmeldet, landet beim
+   nächsten Login-Versuch im Assistenten, nicht still wieder angemeldet.
+
+Cookies lesen und setzen läuft in async-Befehlen bzw. Tasks; WebView2 darf
+dabei nicht im Hauptthread warten.
 
 ## Einstellungen
 
@@ -76,7 +109,9 @@ lokalen Seite (Hauptrepo #792, Konzept §8.6):
 - **Server:** Konfigurationsadresse, Name, Landkreis, Oberfläche,
   Startzentrale, Datenzugang, letzte Prüfung, die rohe Konfiguration;
   *Neu prüfen*, *Server wechseln*.
-- **Anmeldung:** Status und Konto aus dem ID-Token; *Anmelden*, *Abmelden*.
+- **Anmeldung:** Konto, angemeldet seit, Daueranmeldung (Offline-Token) ja
+  oder nein, Ablauf, Sitzung der Oberfläche, Tresor-Pfad; *Anmelden*,
+  *Abmelden*, *Sitzung in der Oberfläche erneuern*.
 - **Daten:** Speicherort mit belegtem und freiem Platz, Tabelle der lokalen
   Pakete (Region, Gruppe, Paket, Version, Größe, Zoom, geprüft);
   *Auf Aktualisierungen prüfen*, *Ordner öffnen*, *Speicherort ändern*,
@@ -185,6 +220,7 @@ ein.
 | `src-tauri/src/ablage.rs` | Datenordner, sichere Pfade, Zustand, freier Speicher |
 | `src-tauri/src/laden.rs` | Downloader mit Range, SHA-256 und Spiegeln |
 | `src-tauri/src/anmeldung.rs` | OIDC PKCE mit Loopback-Rückruf, `offline_access`, Erneuerung, Widerruf, Übernahme aus dem Schlüsselbund |
+| `src-tauri/src/oberflaeche.rs` | Sitzung der Oberfläche aus der Anmeldung: Cookie, Einmalcode, Login-Umleitung, beidseitiges Abmelden |
 | `src-tauri/src/tresor.rs` | Verschlüsselter Token-Tresor im Konfigurationsordner (ChaCha20-Poly1305, DPAPI/0600) |
 | `src-tauri/src/aktualisierung.rs` | Update-Prüfung gegen `client_update` (tauri-plugin-updater) |
 | `werkzeug/update-manifest.mjs` | `latest.json` → `update.json` mit Adressen des eigenen Servers |
@@ -203,6 +239,9 @@ Datenordners schreiben (`ablage::sicherer_pfad`).
 
 - Ende-zu-Ende im echten Fenster: Server-Oberfläche per https mit lokalen
   Kacheln vom Loopback (WebView2 unter Windows, WebKitGTK unter Linux).
+- Ebenso nur im echten Fenster prüfbar: ob `set_cookie` das Sitzungs-Cookie
+  unter WebView2 und WebKitGTK annimmt (sonst greift der Einmalcode), das
+  Abfangen von `/api/auth/login` und das Löschen der Cookies beim Abmelden.
 - Prüfung der optionalen Katalog-Signatur (`daten.signatur_schluessel`,
   `katalog.json.sig`, Ed25519). Der Server legt sie mit `--signieren` an, der
   Client prüft sie noch nicht.

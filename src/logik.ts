@@ -23,9 +23,27 @@ export function anmeldungNoetig(k: ClientKonfig | null): boolean {
   return k?.daten.zugang === 'anmeldung'
 }
 
-/** Schritt nach „Server“: Anmeldung, wenn der Server sie verlangt, sonst gleich die Daten. */
+/** Nennt der Server einen Anmeldedienst? Dann meldet sich der Client an —
+ *  für die Daten (falls verlangt) und für die Oberfläche im Fenster (AD4, #800). */
+export function anmeldungAngeboten(k: ClientKonfig | null): boolean {
+  return anmeldungNoetig(k) || !!k?.anmeldung
+}
+
+/** Schritt nach „Server“: Anmeldung, wenn der Server einen Anmeldedienst nennt, sonst gleich die Daten. */
 export function nachServer(k: ClientKonfig | null): 'anmeldung' | 'daten' {
-  return anmeldungNoetig(k) ? 'anmeldung' : 'daten'
+  return anmeldungAngeboten(k) ? 'anmeldung' : 'daten'
+}
+
+/** Restdauer bis `bis` (Unix-Sekunden) in Worten: „noch 29 Tage“, „noch 4 Minuten“. */
+export function restdauer(bis: number | null | undefined, jetzt = Date.now() / 1000): string {
+  if (!bis) return '–'
+  const s = Math.round(bis - jetzt)
+  if (s <= 0) return 'abgelaufen'
+  const einheit = (n: number, eins: string, viele: string) => `noch ${n} ${n === 1 ? eins : viele}`
+  if (s >= 2 * 86400) return einheit(Math.floor(s / 86400), 'Tag', 'Tage')
+  if (s >= 2 * 3600) return einheit(Math.floor(s / 3600), 'Stunde', 'Stunden')
+  if (s >= 120) return einheit(Math.floor(s / 60), 'Minute', 'Minuten')
+  return einheit(s, 'Sekunde', 'Sekunden')
 }
 
 /** Reihenfolge und Namen der Gruppen im Datenbaum. */
