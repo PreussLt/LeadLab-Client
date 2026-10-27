@@ -7,6 +7,11 @@
 //! einzige Seite mit IPC-Rechten). Nach der Einrichtung navigiert es zur
 //! Oberfläche des Servers; die entfernte Seite bekommt keine Befehle. Zurück
 //! geht es über das Fenstermenü („Daten verwalten“, „Server wechseln“).
+//!
+//! Vollbild (#791): Der Assistent läuft im Fenster; erst der Wechsel zur
+//! Oberfläche schaltet — je nach Einstellung oder `--vollbild`/`--fenster` —
+//! ins Vollbild ohne Menüleiste, auf `--monitor N` oder dem Monitor mit dem
+//! Mauszeiger. Ausstieg über F11/Esc und den Schwebeknopf (vollbild.rs).
 
 pub mod ablage;
 pub mod aktualisierung;
@@ -18,16 +23,18 @@ pub mod konfig;
 pub mod laden;
 pub mod lokal;
 pub mod pmtiles;
+pub mod vollbild;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Manager, State, Url};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::webview::PageLoadEvent;
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, Url};
 
 use ablage::Ablage;
 use einstellungen::Einstellungen;
@@ -52,6 +59,11 @@ struct AppZustand {
     lokal: lokal::Lokal,
     /// Zuletzt gefundenes Update (CS9), bis der Nutzer es installiert.
     update: Mutex<Option<tauri_plugin_updater::Update>>,
+    /// Kommandozeile (#791): `--vollbild`, `--fenster`, `--monitor N`.
+    argumente: vollbild::Argumente,
+    /// Letztes Umschalten — F11 kann Menü-Accelerator und Seitentaste
+    /// zugleich auslösen; das zweite Signal fällt dann weg.
+    vollbild_seit: Mutex<Option<Instant>>,
 }
 
 fn konfig_ordner(app: &AppHandle) -> Result<PathBuf, Fehler> {
@@ -293,15 +305,85 @@ fn einrichtung_speichern(app: AppHandle, ordner: PathBuf, z: State<'_, AppZustan
 
 #[tauri::command]
 fn oberflaeche_oeffnen(app: AppHandle, z: State<'_, AppZustand>) -> Result<(), Fehler> {
-    let ziel = z
-        .einstellungen
-        .lock()
-        .unwrap()
-        .konfig
-        .as_ref()
-        .map(|k| k.oberflaeche.clone())
-        .ok_or_else(|| Fehler::Eingabe("Noch kein Server eingerichtet.".into()))?;
-    navigiere(&app, ziel)
+    let (ziel, einstellung) = {
+        let e = z.einstellungen.lock().unwrap();
+        let ziel = e
+            .konfig
+            .as_ref()
+            .map(|k| k.oberflaeche.clone())
+            .ok_or_else(|| Fehler::Eingabe("Noch kein Server eingerichtet.".into()))?;
+        (ziel, e.vollbild)
+    };
+    // Nur der Übergang Assistent → Oberfläche schaltet ins Vollbild; wer auf
+    // der Oberfläche „LeadLab öffnen“ wählt, behält seinen Fensterzustand.
+    let vom_assistenten = auf_startseite(&app, &z);
+    navigiere(&app, ziel)?;
+    if vom_assistenten && vollbild::im_vollbild(&z.argumente, einstellung) {
+        vollbild_setzen(&app, true);
+    }
+    Ok(())
+}
+
+/// Zeigt das Hauptfenster gerade die lokale Assistentenseite?
+fn auf_startseite(app: &AppHandle, z: &AppZustand) -> bool {
+    let start = z.startseite.lock().unwrap().clone();
+    let jetzt = app.get_webview_window("main").and_then(|w| w.url().ok());
+    match (start, jetzt) {
+        (Some(s), Some(j)) => s.origin() == j.origin(),
+        _ => true,
+    }
+}
+
+/// Vollbild ein (auf dem gewählten Monitor, ohne Menüleiste) oder aus (mit
+/// Menüleiste). Die Seite erfährt den Zustand für Schwebeknopf und Tasten.
+fn vollbild_setzen(app: &AppHandle, an: bool) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    let z = app.state::<AppZustand>();
+    *z.vollbild_seit.lock().unwrap() = Some(Instant::now());
+    if an {
+        let schirme = w.available_monitors().unwrap_or_default();
+        // Unter Wayland kennt der Client die Zeigerposition oft nicht; dann
+        // bleibt es beim ersten Monitor bzw. dem des Fensters (#165).
+        let zeiger = w.cursor_position().ok().and_then(|p| w.monitor_from_point(p.x, p.y).ok().flatten());
+        match vollbild::waehle_monitor(&schirme, z.argumente.monitor, zeiger) {
+            Some(m) => {
+                let p = m.position();
+                let _ = w.set_fullscreen_on_monitor(PhysicalPosition::new(p.x as f64, p.y as f64));
+            }
+            None => {
+                let _ = w.set_fullscreen(true);
+            }
+        }
+        let _ = w.hide_menu();
+    } else {
+        let _ = w.set_fullscreen(false);
+        let _ = w.show_menu();
+    }
+    let _ = w.eval(&vollbild::zustand_skript(an));
+}
+
+/// F11 aus dem Menü: umschalten, außer es wurde gerade erst umgeschaltet.
+fn vollbild_umschalten(app: &AppHandle) {
+    let z = app.state::<AppZustand>();
+    let frisch = z.vollbild_seit.lock().unwrap().map(|t| t.elapsed() < Duration::from_millis(400)).unwrap_or(false);
+    if frisch {
+        return;
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let an = w.is_fullscreen().unwrap_or(false);
+        vollbild_setzen(app, !an);
+    }
+}
+
+/// Menü „Beim Start im Vollbild“: Einstellung umdrehen und speichern. Das
+/// Häkchen schaltet das Menü selbst um.
+fn vollbild_einstellung_umschalten(app: &AppHandle) {
+    let z = app.state::<AppZustand>();
+    let mut e = z.einstellungen.lock().unwrap();
+    e.vollbild = !e.vollbild;
+    if let Ok(o) = konfig_ordner(app) {
+        let _ = e.schreiben(&o);
+    }
 }
 
 fn navigiere(app: &AppHandle, ziel: Url) -> Result<(), Fehler> {
@@ -312,6 +394,10 @@ fn navigiere(app: &AppHandle, ziel: Url) -> Result<(), Fehler> {
 fn zurueck_zum_assistenten(app: &AppHandle, schritt: &str) {
     // Ein laufender Download läuft im Rust-Kern weiter; die Assistentenseite
     // zeigt ihn nach der Rückkehr über die Fortschritt-Events wieder an.
+    // Der Assistent läuft im Fenster (#791).
+    if app.get_webview_window("main").and_then(|w| w.is_fullscreen().ok()).unwrap_or(false) {
+        vollbild_setzen(app, false);
+    }
     let z = app.state::<AppZustand>();
     let start = z.startseite.lock().unwrap().clone();
     if let Some(mut start) = start {
@@ -341,24 +427,45 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
     if let Some(dev) = &app.config().build.dev_url {
         ausgenommen.push(dev.origin().ascii_serialization());
     }
+    let handle = app.handle().clone();
     tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
         .initialization_script(&lokal::initialisierung(lokal, &ausgenommen))
+        .initialization_script(&vollbild::skript(&ausgenommen))
+        // Ausstieg aus dem Vollbild per Pseudo-Adresse: Navigation abbrechen,
+        // Umschalten außerhalb des Navigationsrückrufs.
+        .on_navigation(move |u| {
+            if vollbild::ist_ausstieg(u) {
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move { vollbild_setzen(&h, false) });
+                return false;
+            }
+            true
+        })
+        // Nach jedem Laden erfährt die Seite, ob sie im Vollbild steht.
+        .on_page_load(|w, p| {
+            if p.event() == PageLoadEvent::Finished {
+                let an = w.is_fullscreen().unwrap_or(false);
+                let _ = w.eval(&vollbild::zustand_skript(an));
+            }
+        })
         .build()?;
     Ok(())
 }
 
-fn menue(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+fn menue(app: &AppHandle, vollbild_start: bool) -> tauri::Result<Menu<tauri::Wry>> {
     let daten = MenuItem::with_id(app, "daten", "Daten verwalten …", true, None::<&str>)?;
     let server = MenuItem::with_id(app, "server", "Server wechseln …", true, None::<&str>)?;
     let oberflaeche = MenuItem::with_id(app, "oberflaeche", "LeadLab öffnen", true, None::<&str>)?;
     let vollbild = MenuItem::with_id(app, "vollbild", "Vollbild ein/aus", true, Some("F11"))?;
+    let beim_start =
+        CheckMenuItem::with_id(app, "vollbild_start", "Beim Start im Vollbild", true, vollbild_start, None::<&str>)?;
     let neu = MenuItem::with_id(app, "neu_laden", "Neu laden", true, Some("F5"))?;
     let beenden = PredefinedMenuItem::quit(app, Some("Beenden"))?;
     let leadlab = Submenu::with_items(
         app,
         "LeadLab",
         true,
-        &[&oberflaeche, &neu, &vollbild, &PredefinedMenuItem::separator(app)?, &daten, &server,
+        &[&oberflaeche, &neu, &vollbild, &beim_start, &PredefinedMenuItem::separator(app)?, &daten, &server,
           &PredefinedMenuItem::separator(app)?, &beenden],
     )?;
     Menu::with_items(app, &[&leadlab])
@@ -376,6 +483,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let einstellungen = konfig_ordner(app.handle()).map(|o| Einstellungen::lesen(&o)).unwrap_or_default();
+            let vollbild_start = einstellungen.vollbild;
             // Loopback-Server zuerst: sein Token steht im Initialisierungsskript
             // des Hauptfensters (Konzept §8.3).
             let ordner = einstellungen.datenordner.clone().unwrap_or_else(|| standard_datenordner(app.handle()));
@@ -392,11 +500,13 @@ pub fn run() {
                 sitzung: Arc::new(anmeldung::Sitzung::neu(Arc::new(anmeldung::Schluesselbund))),
                 lokal,
                 update: Mutex::new(None),
+                argumente: vollbild::argumente(std::env::args().skip(1)),
+                vollbild_seit: Mutex::new(None),
             });
             if let Some(w) = app.get_webview_window("main") {
                 *app.state::<AppZustand>().startseite.lock().unwrap() = w.url().ok();
             }
-            app.set_menu(menue(app.handle())?)?;
+            app.set_menu(menue(app.handle(), vollbild_start)?)?;
             app.on_menu_event(|app, ev| match ev.id().as_ref() {
                 "daten" => zurueck_zum_assistenten(app, "daten"),
                 "server" => zurueck_zum_assistenten(app, "server"),
@@ -408,12 +518,8 @@ pub fn run() {
                         let _ = w.eval("location.reload()");
                     }
                 }
-                "vollbild" => {
-                    if let Some(w) = app.get_webview_window("main") {
-                        let an = w.is_fullscreen().unwrap_or(false);
-                        let _ = w.set_fullscreen(!an);
-                    }
-                }
+                "vollbild" => vollbild_umschalten(app),
+                "vollbild_start" => vollbild_einstellung_umschalten(app),
                 _ => {}
             });
             Ok(())

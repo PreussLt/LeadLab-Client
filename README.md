@@ -53,8 +53,29 @@ In jede Seite außer der Assistentenseite spritzt der Client
 `window.__LEADLAB_CLIENT__ = { version, lokal, pakete }` ein (eingefroren).
 Die Frontend-Weiche der Oberfläche liest daraus die lokale Adresse
 (Hauptrepo CS8 #763). IPC-Rechte bekommt die entfernte Seite weiterhin nicht. Das Menü
-**LeadLab** bietet *Daten verwalten*, *Server wechseln*, *Neu laden* (F5) und
-*Vollbild* (F11).
+**LeadLab** bietet *Daten verwalten*, *Server wechseln*, *Neu laden* (F5),
+*Vollbild ein/aus* (F11) und *Beim Start im Vollbild*.
+
+## Vollbild
+
+Für den Arbeitsplatz im Stabsraum öffnet der Client die Oberfläche im
+Vollbild, ohne Fensterrahmen und ohne Menüleiste, wie die Desktop-App
+(Hauptrepo #791, Konzept §8.5). Der Assistent läuft weiter im Fenster; erst
+„LeadLab öffnen“ bzw. der automatische Start wechselt ins Vollbild.
+
+```bash
+leadlab-client --vollbild      # diesmal im Vollbild (Einstellung bleibt)
+leadlab-client --fenster       # diesmal im Fenster
+leadlab-client --monitor 1     # Vollbild auf dem zweiten Monitor
+```
+
+Ohne `--vollbild`/`--fenster` gilt *Beim Start im Vollbild* aus dem Menü
+(`einstellungen.json`, Feld `vollbild`). Ohne `--monitor` nimmt der Client den
+Monitor, auf dem der Mauszeiger steht. Hinaus geht es mit F11, Esc (nur wenn
+kein Dialog offen ist und kein Eingabefeld den Fokus hat) oder dem
+Schwebeknopf **✕ Vollbild verlassen** unten rechts; dann kommt die
+Menüleiste zurück. Knopf und Tasten navigieren auf `leadlab://vollbild-aus`,
+das der Client abfängt. Die Server-Oberfläche bekommt dafür keine IPC-Rechte.
 
 ## Formate
 
@@ -135,7 +156,8 @@ ein.
 | `werkzeug/update-manifest.mjs` | `latest.json` → `update.json` mit Adressen des eigenen Servers |
 | `src-tauri/src/lokal.rs` | Loopback-Server für lokale Pakete, Initialisierungsskript |
 | `src-tauri/src/pmtiles.rs` | PMTiles v3 lesen (Hilbert-Ids, Blattverzeichnisse) |
-| `src-tauri/src/lib.rs` | Tauri-Befehle, Menü, Navigation zur Server-Oberfläche |
+| `src-tauri/src/vollbild.rs` | Kommandozeile, Monitorwahl, Schwebeknopf-Skript |
+| `src-tauri/src/lib.rs` | Tauri-Befehle, Menü, Navigation zur Server-Oberfläche, Vollbild |
 
 **Sicherheit:** IPC-Rechte hat nur die lokale Assistentenseite
 (`capabilities/default.json` ohne `remote`). Die Server-Oberfläche im selben

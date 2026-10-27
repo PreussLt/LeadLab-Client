@@ -25,6 +25,10 @@ pub struct Einstellungen {
     /// Assistent einmal vollständig durchlaufen.
     #[serde(default)]
     pub eingerichtet: bool,
+    /// Oberfläche im Vollbild öffnen (#791); `--vollbild`/`--fenster`
+    /// schlagen das für einen Start, ohne es zu ändern.
+    #[serde(default)]
+    pub vollbild: bool,
 }
 
 impl Einstellungen {
@@ -56,11 +60,21 @@ mod tests {
             konfig_adresse: Some("lead.lab".into()),
             datenordner: Some(d.path().join("daten")),
             eingerichtet: true,
+            vollbild: true,
             ..Default::default()
         };
         e.schreiben(d.path()).unwrap();
         assert_eq!(Einstellungen::lesen(d.path()), e);
         std::fs::write(d.path().join(DATEI), b"{kaputt").unwrap();
         assert_eq!(Einstellungen::lesen(d.path()), Einstellungen::default());
+    }
+
+    /// Ältere einstellungen.json ohne Feld `vollbild` bleiben lesbar.
+    #[test]
+    fn vollbild_fehlt_in_alter_datei() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(DATEI), br#"{"konfig_adresse":"lead.lab","eingerichtet":true}"#).unwrap();
+        let e = Einstellungen::lesen(d.path());
+        assert!(e.eingerichtet && !e.vollbild);
     }
 }
