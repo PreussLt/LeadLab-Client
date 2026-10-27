@@ -14,7 +14,7 @@ export interface ClientKonfig {
   daten: { katalog: string; zugang: 'anmeldung' | 'offen' }
   marke?: { landkreis?: string | null; logo?: string | null }
   startzentrale?: string | null
-  anmeldung?: { issuer: string; client_id: string; scopes?: string[] } | null
+  anmeldung?: { issuer: string; client_id: string; scopes?: string[]; formular?: boolean } | null
   client_update?: string | null
 }
 
@@ -233,4 +233,30 @@ export function browserStill(w: WarteStand | null | undefined, jetzt = Date.now(
 /** Fehlertext eines Anmeldeversuchs; ein Abbruch durch den Nutzer ist keiner. */
 export function anmeldeFehler(text: string): string {
   return text === 'Abgebrochen.' ? '' : text
+}
+
+// ── Anmeldemaske (#804) ────────────────────────────────────────────────────
+// Texte aus anmeldung.rs (FORMULAR_FALSCH …); ein Vitest hält sie gleich.
+
+export const FORMULAR_FALSCH = 'Benutzername oder Passwort falsch.'
+/** Brute-Force-Schutz des Realms: nach so vielen Fehlversuchen sperrt Keycloak. */
+export const SPERRE_NACH = 5
+
+/** Fehlertext der Maske. Keycloak 26 meldet die Sperre nach Fehlversuchen
+ *  wie ein falsches Passwort; darum zählt die Maske mit und warnt vorher. */
+export function formularFehler(text: string, fehlversuche: number): string {
+  if (text !== FORMULAR_FALSCH) return text
+  if (fehlversuche >= SPERRE_NACH) {
+    return `${FORMULAR_FALSCH} Nach ${SPERRE_NACH} Fehlversuchen sperrt der Server das Konto vorübergehend – dann scheitert auch das richtige Passwort. Bitte etwa eine Minute warten (nach weiteren Fehlversuchen bis zu 15 Minuten) und dann erneut anmelden.`
+  }
+  if (fehlversuche >= SPERRE_NACH - 2) {
+    const rest = SPERRE_NACH - fehlversuche
+    return `${FORMULAR_FALSCH} Noch ${rest} ${rest === 1 ? 'Versuch' : 'Versuche'}, dann sperrt der Server das Konto für einige Minuten.`
+  }
+  return FORMULAR_FALSCH
+}
+
+/** Zeigt der Schritt die Maske? Nur ohne Anmeldung, wenn der Server sie erlaubt. */
+export function formularZeigen(a: { angemeldet: boolean; formular?: boolean } | null | undefined): boolean {
+  return !!a && !a.angemeldet && a.formular === true
 }

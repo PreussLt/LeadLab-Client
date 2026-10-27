@@ -179,6 +179,8 @@ struct AnmeldeAnsicht {
     warten: Option<WarteAnsicht>,
     /// Fehler einer Anmeldung im Client-Fenster (nur in `anmeldung_status`).
     meldung: Option<String>,
+    /// Der Server erlaubt die Anmeldemaske (`anmeldung.formular`, #804).
+    formular: bool,
 }
 
 /// Spiegelt `anmeldung::Warten` für die Ansicht (#805).
@@ -217,6 +219,7 @@ fn anmelde_ansicht(z: &AppZustand, k: &ClientKonfig) -> AnmeldeAnsicht {
             still_sek: anmeldung::STILL_SEK,
         }),
         meldung: None,
+        formular: k.anmeldung.as_ref().map(|a| a.formular).unwrap_or(false),
     }
 }
 
@@ -271,6 +274,22 @@ async fn anmelden(app: AppHandle) -> Result<AnmeldeAnsicht, Fehler> {
         }
     }
     ergebnis?;
+    Ok(anmelde_ansicht(&z, &k))
+}
+
+/// Anmeldemaske (#804): Benutzername/Passwort direkt am Token-Endpunkt. Das
+/// Passwort liegt nur in diesem Aufruf und wird danach überschrieben; es
+/// erscheint in keiner Meldung und keinem Protokoll.
+#[tauri::command]
+async fn anmelden_formular(z: State<'_, AppZustand>, benutzer: String, passwort: String) -> Result<AnmeldeAnsicht, Fehler> {
+    let passwort = zeroize::Zeroizing::new(passwort);
+    let k = aktive_konfig(&z)?;
+    let a = k.anmeldung.clone().ok_or_else(|| Fehler::Server("Der Server nennt keinen Anmeldedienst.".into()))?;
+    // Wartet noch eine Browser-Anmeldung, endet sie: Es gilt das Formular.
+    if let Some(w) = z.warten.lock().unwrap().take() {
+        w.abbrechen();
+    }
+    z.sitzung.anmelden_mit_passwort(&z.client, &a, &benutzer, &passwort).await?;
     Ok(anmelde_ansicht(&z, &k))
 }
 
@@ -1133,6 +1152,7 @@ pub fn run() {
             oberflaeche_oeffnen,
             anmeldung_status,
             anmelden,
+            anmelden_formular,
             anmeldung_abbrechen,
             anmeldung_browser_oeffnen,
             anmeldung_im_fenster,

@@ -18,6 +18,12 @@
 //!   Oberfläche machen kann (AD3/AD4).
 //! - Abmelden widerruft das Refresh-Token beim Anmeldedienst (RFC 7009) und
 //!   löscht den Tresor.
+//! - Anmeldemaske (#804): Benutzername/Passwort direkt am Token-Endpunkt
+//!   (Resource Owner Password Credentials, `grant_type=password`), Ergebnis
+//!   in denselben Tresor. Das Passwort bleibt im Speicher, wird nie
+//!   geschrieben oder protokolliert und nach dem Aufruf überschrieben
+//!   (`zeroize`; die Kopie im HTTP-Rumpf von reqwest erreicht das nicht).
+//!   Zwei-Faktor und Identity-Provider bleiben dem Browser-Weg vorbehalten.
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering as AtomOrdnung};
@@ -111,21 +117,26 @@ pub async fn entdecken(client: &reqwest::Client, issuer: &Url) -> Result<Endpunk
     Ok(ep)
 }
 
-/// Adresse der Anmeldeseite für den Systembrowser.
-pub fn anmelde_url(ep: &Endpunkte, k: &AnmeldeKonfig, redirect: &str, p: &Pkce) -> Url {
+/// Angefragte Scopes: die der Konfigurationsadresse als Basis, `openid`
+/// vorn, `offline_access` dazu (Browser und Formular gleich).
+pub fn scopes(k: &AnmeldeKonfig) -> String {
     let mut scopes = k.scopes.clone();
     if !scopes.iter().any(|s| s == "openid") {
         scopes.insert(0, "openid".into());
     }
-    // Die Scopes der Konfigurationsadresse bleiben die Basis; offline_access kommt dazu.
     if !scopes.iter().any(|s| s == OFFLINE) {
         scopes.push(OFFLINE.into());
     }
+    scopes.join(" ")
+}
+
+/// Adresse der Anmeldeseite für den Systembrowser.
+pub fn anmelde_url(ep: &Endpunkte, k: &AnmeldeKonfig, redirect: &str, p: &Pkce) -> Url {
     let mut u = ep.authorization_endpoint.clone();
     u.query_pairs_mut()
         .append_pair("client_id", &k.client_id)
         .append_pair("response_type", "code")
-        .append_pair("scope", &scopes.join(" "))
+        .append_pair("scope", &scopes(k))
         .append_pair("redirect_uri", redirect)
         .append_pair("state", &p.state)
         .append_pair("code_challenge", &p.challenge)
@@ -321,7 +332,7 @@ pub struct Tokens {
 }
 
 #[derive(Deserialize)]
-struct FehlerAntwort {
+pub struct FehlerAntwort {
     error: String,
     #[serde(default)]
     error_description: Option<String>,
@@ -330,7 +341,65 @@ struct FehlerAntwort {
 /// Abgelehnt (invalid_grant: Sitzung beendet, Konto gesperrt) — neu anmelden.
 pub const ABGELEHNT: &str = "Die Anmeldung ist abgelaufen. Bitte neu anmelden.";
 
-async fn token_anfrage(client: &reqwest::Client, ep: &Endpunkte, form: &[(&str, &str)]) -> Result<Tokens, Fehler> {
+/// Fehler des Token-Endpunkts beim Code-Tausch und bei der Erneuerung.
+fn standard_fehler(status: u16, f: Option<FehlerAntwort>) -> Fehler {
+    match f {
+        Some(f) if f.error == "invalid_grant" => Fehler::Server(ABGELEHNT.into()),
+        Some(f) => Fehler::Server(format!("Anmeldedienst: {}", f.error_description.unwrap_or(f.error))),
+        None => Fehler::Server(format!("Anmeldedienst antwortet mit {status}.")),
+    }
+}
+
+// Texte der Anmeldemaske (#804). Die Oberfläche vergleicht FALSCH, um
+// Fehlversuche zu zählen (logik.ts, Vitest prüft den Gleichlauf).
+pub const FORMULAR_FALSCH: &str = "Benutzername oder Passwort falsch.";
+pub const FORMULAR_GESPERRT: &str =
+    "Das Konto ist nach zu vielen Fehlversuchen vorübergehend gesperrt. Bitte einige Minuten warten und dann erneut anmelden.";
+pub const FORMULAR_DEAKTIVIERT: &str = "Das Konto ist gesperrt. Bitte an die Verwaltung wenden.";
+pub const FORMULAR_UNVOLLSTAENDIG: &str =
+    "Das Konto ist noch nicht fertig eingerichtet (z. B. E-Mail bestätigen oder Passwort ändern). Bitte einmal „Im Browser anmelden“.";
+pub const FORMULAR_NICHT_ERLAUBT: &str =
+    "Der Server erlaubt die Anmeldung per Formular nicht. Bitte „Im Browser anmelden“.";
+pub const FORMULAR_NUR_BROWSER: &str =
+    "Dieses Konto meldet sich mit zweitem Faktor an. Bitte „Im Browser anmelden“.";
+pub const FORMULAR_LEER: &str = "Bitte Benutzername und Passwort eingeben.";
+pub const FORMULAR_AUS: &str = "Der Server hat die Anmeldung per Formular abgeschaltet. Bitte „Im Browser anmelden“.";
+
+/// Fehler des Token-Endpunkts beim Passwort-Grant, gegen Keycloak 26.8
+/// geprüft (Konzept Client §7): falsches Passwort und unbekannter Nutzer
+/// `invalid_grant` „Invalid user credentials“; die Sperre nach Fehlversuchen
+/// meldet Keycloak 26 genauso (ältere Fassungen „Account temporarily
+/// disabled“); offene Pflichtaktion „Account is not fully set up“; Direct
+/// Grants aus `unauthorized_client`; Admins lehnt der Ablauf `leadlab
+/// direktzugang` mit 401 und einer HTML-Seite ab.
+pub fn formular_fehler(status: u16, f: Option<FehlerAntwort>) -> Fehler {
+    let text = match f {
+        Some(f) if f.error == "invalid_grant" => {
+            let d = f.error_description.unwrap_or_default().to_lowercase();
+            if d.contains("temporarily") {
+                FORMULAR_GESPERRT
+            } else if d.contains("not fully set up") {
+                FORMULAR_UNVOLLSTAENDIG
+            } else if d.contains("disabled") {
+                FORMULAR_DEAKTIVIERT
+            } else {
+                FORMULAR_FALSCH
+            }
+        }
+        Some(f) if f.error == "unauthorized_client" => FORMULAR_NICHT_ERLAUBT,
+        Some(f) => return Fehler::Server(format!("Anmeldedienst: {}", f.error_description.unwrap_or(f.error))),
+        None if status == 401 => FORMULAR_NUR_BROWSER,
+        None => return Fehler::Server(format!("Anmeldedienst antwortet mit {status}.")),
+    };
+    Fehler::Server(text.into())
+}
+
+async fn token_anfrage(
+    client: &reqwest::Client,
+    ep: &Endpunkte,
+    form: &[(&str, &str)],
+    fehler: fn(u16, Option<FehlerAntwort>) -> Fehler,
+) -> Result<Tokens, Fehler> {
     let antwort = client
         .post(ep.token_endpoint.clone())
         .form(form)
@@ -340,11 +409,7 @@ async fn token_anfrage(client: &reqwest::Client, ep: &Endpunkte, form: &[(&str, 
     let status = antwort.status();
     if status.as_u16() == 400 || status.as_u16() == 401 {
         let f: Option<FehlerAntwort> = antwort.json().await.ok();
-        return Err(match f {
-            Some(f) if f.error == "invalid_grant" => Fehler::Server(ABGELEHNT.into()),
-            Some(f) => Fehler::Server(format!("Anmeldedienst: {}", f.error_description.unwrap_or(f.error))),
-            None => Fehler::Server(format!("Anmeldedienst antwortet mit {}.", status.as_u16())),
-        });
+        return Err(fehler(status.as_u16(), f));
     }
     if !status.is_success() {
         return Err(Fehler::Server(format!("Anmeldedienst antwortet mit {}.", status.as_u16())));
@@ -370,12 +435,44 @@ pub async fn code_tauschen(
             ("redirect_uri", redirect),
             ("code_verifier", verifier),
         ],
+        standard_fehler,
     )
     .await
 }
 
 pub async fn erneuern(client: &reqwest::Client, ep: &Endpunkte, client_id: &str, refresh: &str) -> Result<Tokens, Fehler> {
-    token_anfrage(client, ep, &[("grant_type", "refresh_token"), ("client_id", client_id), ("refresh_token", refresh)]).await
+    token_anfrage(
+        client,
+        ep,
+        &[("grant_type", "refresh_token"), ("client_id", client_id), ("refresh_token", refresh)],
+        standard_fehler,
+    )
+    .await
+}
+
+/// Passwort-Grant (#804). Das Passwort geht nur in den Formularrumpf an den
+/// Token-Endpunkt; Fehlertexte nennen es nie.
+pub async fn passwort_tauschen(
+    client: &reqwest::Client,
+    ep: &Endpunkte,
+    k: &AnmeldeKonfig,
+    benutzer: &str,
+    passwort: &str,
+) -> Result<Tokens, Fehler> {
+    let scope = scopes(k);
+    token_anfrage(
+        client,
+        ep,
+        &[
+            ("grant_type", "password"),
+            ("client_id", &k.client_id),
+            ("username", benutzer),
+            ("password", passwort),
+            ("scope", &scope),
+        ],
+        formular_fehler,
+    )
+    .await
 }
 
 /// Widerruf eines Refresh-Tokens (RFC 7009). Keycloak beendet damit auch
@@ -634,6 +731,33 @@ impl Sitzung {
         Ok(self.status(k))
     }
 
+    /// Anmeldung über die Maske des Clients (#804): Benutzername/Passwort am
+    /// Token-Endpunkt aus der Discovery, Ergebnis wie beim Code-Tausch in den
+    /// Tresor. Das Passwort hält der Aufrufer in `Zeroizing`.
+    pub async fn anmelden_mit_passwort(
+        &self,
+        client: &reqwest::Client,
+        k: &AnmeldeKonfig,
+        benutzer: &str,
+        passwort: &str,
+    ) -> Result<Status, Fehler> {
+        if !k.formular {
+            return Err(Fehler::Eingabe(FORMULAR_AUS.into()));
+        }
+        let benutzer = benutzer.trim();
+        if benutzer.is_empty() || passwort.is_empty() {
+            return Err(Fehler::Eingabe(FORMULAR_LEER.into()));
+        }
+        let ep = entdecken(client, &k.issuer).await?;
+        let t = passwort_tauschen(client, &ep, k, benutzer, passwort).await?;
+        {
+            let _g = self.sperre.lock().await;
+            self.uebernehmen(k, &t, None)?;
+        }
+        let _ = self.alt.loeschen(&konto(k));
+        Ok(self.status(k))
+    }
+
     /// Ein gültiges Access-Token: aus dem Tresor, sonst per Refresh-Token
     /// (Ergebnis zurück in den Tresor). `None` heißt: nicht angemeldet —
     /// auch, wenn Keycloak die Erneuerung ablehnt (Tresor ist dann geleert).
@@ -771,6 +895,27 @@ mod tests {
                                     jwt(jetzt() + 300)
                                 ))
                             }
+                            // Passwort-Grant (#804) mit den Antworten von Keycloak 26.8.
+                            Some("password") => {
+                                assert!(feld("scope").unwrap_or("").split(' ').any(|s| s == OFFLINE), "Formular fordert offline_access an");
+                                match (feld("username"), feld("password")) {
+                                    (Some("kbm.mueller"), Some("richtig")) => {
+                                        let r = offline(0);
+                                        *g.lock().unwrap() = r.clone();
+                                        let id = jwt_mit(r#"{"preferred_username":"kbm.mueller"}"#);
+                                        ("200 OK", format!(
+                                            r#"{{"access_token":"{}","expires_in":300,"refresh_token":"{r}","refresh_expires_in":2592000,"id_token":"{id}","scope":"openid offline_access"}}"#,
+                                            jwt(jetzt() + 300)
+                                        ))
+                                    }
+                                    (Some("verwaltung"), _) => ("401 Unauthorized", "<!DOCTYPE html><title>Zugriff verweigert</title>".to_string()),
+                                    (Some("neu"), _) => ("400 Bad Request", r#"{"error":"invalid_grant","error_description":"Account is not fully set up"}"#.to_string()),
+                                    (Some("alt-gesperrt"), _) => ("400 Bad Request", r#"{"error":"invalid_grant","error_description":"Account temporarily disabled"}"#.to_string()),
+                                    (Some("abgeschaltet"), _) => ("400 Bad Request", r#"{"error":"invalid_grant","error_description":"Account disabled"}"#.to_string()),
+                                    (Some("formular-aus"), _) => ("400 Bad Request", r#"{"error":"unauthorized_client","error_description":"Client not allowed for direct access grants"}"#.to_string()),
+                                    _ => ("400 Bad Request", r#"{"error":"invalid_grant","error_description":"Invalid user credentials"}"#.to_string()),
+                                }
+                            }
                             Some("refresh_token") if feld("refresh_token") == Some(g.lock().unwrap().as_str()) => {
                                 let nr = z.fetch_add(1, Ordering::SeqCst) + 1;
                                 let r = offline(nr);
@@ -791,7 +936,7 @@ mod tests {
     }
 
     fn konfig(issuer: &Url) -> AnmeldeKonfig {
-        AnmeldeKonfig { issuer: issuer.clone(), client_id: "leadlab-client".into(), scopes: vec!["openid".into()] }
+        AnmeldeKonfig { issuer: issuer.clone(), client_id: "leadlab-client".into(), scopes: vec!["openid".into()], formular: true }
     }
 
     fn sitzung(ordner: &std::path::Path, alt: Arc<Speicher>) -> Sitzung {
@@ -1132,6 +1277,89 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.to_string(), ABGELEHNT);
+    }
+
+    #[tokio::test]
+    async fn passwort_legt_alles_in_den_tresor() {
+        let kc = keycloak().await;
+        let k = konfig(&kc.issuer);
+        let d = tempfile::tempdir().unwrap();
+        let alt = Arc::new(Speicher::default());
+        alt.schreiben(&konto(&k), "alter-eintrag");
+        let s = sitzung(d.path(), alt.clone());
+        let client = reqwest::Client::new();
+        let passwort = zeroize::Zeroizing::new(String::from("richtig"));
+        let st = s.anmelden_mit_passwort(&client, &k, "  kbm.mueller ", &passwort).await.unwrap();
+        assert!(st.angemeldet && st.offline);
+        assert_eq!(st.konto.as_deref(), Some("kbm.mueller"));
+        assert!(st.angemeldet_seit.unwrap() >= jetzt() - 5);
+        // Tresor vollständig wie nach dem Browser-Weg.
+        let e = Tresor::neu(d.path(), Schluessel::Fest([9; 32])).lesen().unwrap();
+        assert_eq!(e.refresh_token, *kc.gueltig.lock().unwrap());
+        assert!(e.refresh_offline && e.id_token.is_some() && !e.access_token.is_empty() && e.access_bis > jetzt());
+        assert_eq!(e.konto.as_deref(), Some("kbm.mueller"));
+        assert_eq!(alt.lesen(&konto(&k)).unwrap(), None, "Schlüsselbund-Altlast entfernt");
+        // Erneuern und Abmelden laufen wie gewohnt.
+        let mut e2 = e.clone();
+        e2.access_bis = 0;
+        Tresor::neu(d.path(), Schluessel::Fest([9; 32])).schreiben(&e2).unwrap();
+        assert!(s.token(&client, &k).await.unwrap().is_some());
+        assert!(s.abmelden(&client, &k).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn passwort_fehler_sind_verstaendlich() {
+        let kc = keycloak().await;
+        let k = konfig(&kc.issuer);
+        let d = tempfile::tempdir().unwrap();
+        let s = sitzung(d.path(), Arc::default());
+        let client = reqwest::Client::new();
+        let fehler = |benutzer: &'static str, passwort: &'static str| {
+            let (s, client, k) = (&s, &client, &k);
+            async move { s.anmelden_mit_passwort(client, k, benutzer, passwort).await.unwrap_err().to_string() }
+        };
+        assert_eq!(fehler("kbm.mueller", "falsch").await, FORMULAR_FALSCH);
+        assert_eq!(fehler("niemand", "x").await, FORMULAR_FALSCH);
+        assert_eq!(fehler("alt-gesperrt", "x").await, FORMULAR_GESPERRT);
+        assert_eq!(fehler("abgeschaltet", "x").await, FORMULAR_DEAKTIVIERT);
+        assert_eq!(fehler("neu", "x").await, FORMULAR_UNVOLLSTAENDIG);
+        assert_eq!(fehler("formular-aus", "x").await, FORMULAR_NICHT_ERLAUBT);
+        assert_eq!(fehler("verwaltung", "x").await, FORMULAR_NUR_BROWSER);
+        assert_eq!(fehler("kbm.mueller", "").await, FORMULAR_LEER);
+        assert_eq!(fehler(" ", "x").await, FORMULAR_LEER);
+        // Kein Fehlertext nennt das Passwort, der Tresor bleibt leer.
+        assert!(!fehler("kbm.mueller", "geheim-123").await.contains("geheim-123"));
+        assert!(!s.status(&k).angemeldet && !s.tresor_pfad().exists());
+        // Vom Betreiber abgeschaltet: keine Anfrage an den Anmeldedienst.
+        let mut aus = k.clone();
+        aus.formular = false;
+        assert_eq!(s.anmelden_mit_passwort(&client, &aus, "kbm.mueller", "richtig").await.unwrap_err().to_string(), FORMULAR_AUS);
+        // Netzfehler wie bisher.
+        let weg = konfig(&Url::parse("http://127.0.0.1:9/realms/leadlab").unwrap());
+        assert!(matches!(s.anmelden_mit_passwort(&client, &weg, "a", "b").await, Err(Fehler::Netz(_))));
+    }
+
+    /// Gegen einen echten Keycloak (Wegwerf-Container mit realm-leadlab.json):
+    /// `LEADLAB_TEST_KEYCLOAK=<issuer> LEADLAB_TEST_BENUTZER=… LEADLAB_TEST_PASSWORT=…
+    /// cargo test -- --ignored echter_keycloak`.
+    #[tokio::test]
+    #[ignore]
+    async fn echter_keycloak_passwort() {
+        let Ok(iss) = std::env::var("LEADLAB_TEST_KEYCLOAK") else { return };
+        let k = konfig(&Url::parse(&iss).unwrap());
+        let d = tempfile::tempdir().unwrap();
+        let s = sitzung(d.path(), Arc::default());
+        let c = reqwest::Client::new();
+        let b = std::env::var("LEADLAB_TEST_BENUTZER").unwrap();
+        let p = zeroize::Zeroizing::new(std::env::var("LEADLAB_TEST_PASSWORT").unwrap());
+        assert_eq!(s.anmelden_mit_passwort(&c, &k, &b, "falsch").await.unwrap_err().to_string(), FORMULAR_FALSCH);
+        let st = s.anmelden_mit_passwort(&c, &k, &b, &p).await.unwrap();
+        println!("angemeldet: {st:?}");
+        assert!(st.angemeldet && st.offline && st.konto.as_deref() == Some(b.as_str()));
+        if let Ok(admin) = std::env::var("LEADLAB_TEST_ADMIN") {
+            assert_eq!(s.anmelden_mit_passwort(&c, &k, &admin, &p).await.unwrap_err().to_string(), FORMULAR_NUR_BROWSER);
+        }
+        assert!(s.abmelden(&c, &k).await.unwrap(), "Widerruf am echten Keycloak");
     }
 
     #[tokio::test]

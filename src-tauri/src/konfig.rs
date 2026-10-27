@@ -22,6 +22,15 @@ pub struct Anmeldung {
     pub client_id: String,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Anmeldemaske Benutzername/Passwort im Client (#804). Fehlt das Feld,
+    /// gilt `true`; ein Betreiber schaltet sie mit `false` ab, dann bleibt nur
+    /// der Browser-Weg.
+    #[serde(default = "ja")]
+    pub formular: bool,
+}
+
+fn ja() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -236,6 +245,16 @@ mod tests {
         let mut k = beispiel();
         k.schema = "leadlab-client/9".into();
         assert!(pruefe(&k).is_err());
+    }
+
+    #[test]
+    fn formular_ist_vorgabe_und_abschaltbar() {
+        assert!(beispiel().anmeldung.unwrap().formular);
+        let ohne: Anmeldung = serde_json::from_str(r#"{"issuer":"https://a.de/realms/x","client_id":"c"}"#).unwrap();
+        assert!(ohne.formular, "ältere Server ohne das Feld: Formular an");
+        let aus: Anmeldung =
+            serde_json::from_str(r#"{"issuer":"https://a.de/realms/x","client_id":"c","formular":false}"#).unwrap();
+        assert!(!aus.formular);
     }
 
     #[test]

@@ -107,12 +107,12 @@ h1 { margin: 0; color: rgb(var(--farbe-titel)); font-size: 28px; font-weight: 60
 }
 label.feldname { display: block; font-weight: 500; color: rgb(var(--farbe-titel)); margin-bottom: 8px; }
 .zeile { display: flex; gap: 12px; align-items: stretch; }
-input[type='text'] {
+input[type='text'], input[type='password'] {
   flex: 1; min-height: 48px; padding: 0 14px; font: inherit;
   background: rgb(var(--farbe-feld)); color: rgb(var(--farbe-titel));
   border: 1px solid rgb(var(--farbe-rand-stark)); border-radius: 8px;
 }
-input[type='text']:hover { border-color: rgb(var(--farbe-rand-betont)); }
+input[type='text']:hover, input[type='password']:hover { border-color: rgb(var(--farbe-rand-betont)); }
 :focus-visible { outline: 2px solid rgb(var(--farbe-fokus)); outline-offset: 2px; }
 
 button {
@@ -202,3 +202,9 @@ button.klein { min-height: 44px; padding: 0 14px; }
 .warten p, .meldung p { margin: 0; }
 .meldung .knoepfe { justify-content: flex-start; margin-top: 12px; }
 input.mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 14px; }
+
+/* ── Anmeldemaske (#804) ────────────────────────────────────────── */
+.formular { display: flex; flex-direction: column; gap: 16px; max-width: 520px; }
+.formular input { width: 100%; }
+.formular p { margin: 0; }
+.formular .knoepfe { justify-content: flex-start; }

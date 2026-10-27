@@ -406,7 +406,7 @@ mod tests {
         let basis = server(p.clone(), 200).await;
         let d = tempfile::tempdir().unwrap();
         let issuer = basis.join("realms/leadlab").unwrap();
-        let k = AnmeldeKonfig { issuer: issuer.clone(), client_id: "leadlab-client".into(), scopes: vec![] };
+        let k = AnmeldeKonfig { issuer: issuer.clone(), client_id: "leadlab-client".into(), scopes: vec![], formular: true };
         let tresor = Tresor::neu(d.path(), Schluessel::Fest([5; 32]));
         tresor
             .schreiben(&Eintrag {

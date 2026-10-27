@@ -18,8 +18,17 @@ dieses Grundgerüst ist CS1 #756). Dort ist dieses Repo als Submodul
    angegebene `.json`) und zeigt Name, Landkreis, Version und Datenzugang.
    `http://` gilt nur für `localhost`, `lead.lab` und private Adressen.
 2. **Anmeldung** (wenn der Server einen Anmeldedienst nennt): Ein Login gilt
-   für die Datenpakete **und** für die Oberfläche im Fenster. Der Knopf
-   öffnet den Systembrowser auf die Keycloak-Anmeldung des Servers
+   für die Datenpakete **und** für die Oberfläche im Fenster. Die
+   **Anmeldemaske** fragt Benutzername und Passwort ab und tauscht sie direkt
+   am Token-Endpunkt von Keycloak (`grant_type=password`, Client
+   `leadlab-client`, `scope=openid offline_access`; Hauptrepo #804). Das
+   Passwort wird nie gespeichert oder protokolliert und im Kern nach dem
+   Aufruf überschrieben (`zeroize`). Falsches Passwort, Sperre nach fünf
+   Fehlversuchen, Konten mit Admin-Rolle oder OTP und ein Server ohne
+   Formular bekommen eigene Meldungen; die letzten verweisen auf den
+   Browser. Die Maske lässt sich serverseitig abschalten
+   (`anmeldung.formular: false` in der Konfigurationsadresse). Der zweite
+   Knopf *Im Browser anmelden* öffnet den Systembrowser auf die Keycloak-Anmeldung des Servers
    (öffentlicher Client `leadlab-client`, Authorization Code + PKCE S256), der
    Client wartet auf `http://127.0.0.1:<zufallsport>/rueckruf` (RFC 8252).
    Währenddessen zeigt der Schritt die Anmeldeadresse mit *Link kopieren*,
@@ -116,8 +125,8 @@ lokalen Seite (Hauptrepo #792, Konzept §8.6):
   Startzentrale, Datenzugang, letzte Prüfung, die rohe Konfiguration;
   *Neu prüfen*, *Server wechseln*.
 - **Anmeldung:** Konto, angemeldet seit, Daueranmeldung (Offline-Token) ja
-  oder nein, Ablauf, Sitzung der Oberfläche, Tresor-Pfad; *Anmelden*,
-  *Abmelden*, *Sitzung in der Oberfläche erneuern*.
+  oder nein, Ablauf, Sitzung der Oberfläche, Tresor-Pfad; Anmeldemaske,
+  *Im Browser anmelden*, *Abmelden*, *Sitzung in der Oberfläche erneuern*.
 - **Daten:** Speicherort mit belegtem und freiem Platz, Tabelle der lokalen
   Pakete (Region, Gruppe, Paket, Version, Größe, Zoom, geprüft);
   *Auf Aktualisierungen prüfen*, *Ordner öffnen*, *Speicherort ändern*,

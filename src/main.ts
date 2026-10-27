@@ -15,7 +15,7 @@ import { listen } from '@tauri-apps/api/event'
 import {
   type Auswahl, type ClientKonfig, type Katalog,
   type PaketZeile, type WarteStand,
-  aktualisierungen, anmeldeFehler, anmeldungAngeboten, browserStill, aufgeloest, baum, gesamt, gesperrt, groesse, gruppenTitel, nachServer, paketBytes,
+  FORMULAR_FALSCH, aktualisierungen, anmeldeFehler, anmeldungAngeboten, browserStill, formularFehler, formularZeigen, aufgeloest, baum, gesamt, gesperrt, groesse, gruppenTitel, nachServer, paketBytes,
   paketTabelle, restdauer, startverhalten, summeBytes, umschalten, vorauswahl, zeitpunkt, zoomText,
 } from './logik'
 
@@ -38,6 +38,8 @@ interface Anmeldestand {
   warten?: WarteStand | null
   /** Fehler einer Anmeldung im Client-Fenster, einmal abgeholt. */
   meldung?: string | null
+  /** Der Server erlaubt die Anmeldemaske (#804). */
+  formular?: boolean
 }
 /** Spiegelt `Uebersicht` in lib.rs. */
 interface Uebersicht {
@@ -90,7 +92,13 @@ const z = {
   warten: null as WarteStand | null,
   /** „Link kopieren“ hat geklappt. */
   kopiert: false,
+  /** Anmeldemaske (#804). Das Passwort steht NICHT hier, sondern nur im
+   *  Eingabefeld `passwortFeld`. */
+  formular: { benutzer: '', fehlversuche: 0, fehler: '' },
 }
+
+/** Nach erfolgreicher Anmeldung so lange den Kontonamen zeigen, dann weiter. */
+const WEITER_MS = 1200
 
 const SCHRITTE: { id: Schritt; titel: string }[] = [
   { id: 'server', titel: 'Server' },
@@ -207,6 +215,51 @@ async function anmelden() {
   }
   if (z.schritt === 'einstellungen') await einstellungenLaden()
   else zeichne()
+}
+
+// ── Anmeldemaske (#804) ────────────────────────────────────────────────────
+// Benutzername/Passwort gehen an den Rust-Kern, der sie per Passwort-Grant an
+// Keycloak gibt. Das Passwort lebt nur im Eingabefeld: Es ist über alle
+// Neuzeichnungen dasselbe Element (zeichne() baut sonst alles neu), wird nach
+// Erfolg geleert und weder gespeichert noch protokolliert.
+
+let passwortFeld: HTMLInputElement | null = null
+function passwortEingabe(): HTMLInputElement {
+  passwortFeld ??= h('input', { type: 'password', id: 'passwort', autocomplete: 'current-password', spellcheck: 'false' }) as HTMLInputElement
+  return passwortFeld
+}
+
+function weiterNachAnmeldung() {
+  return z.info?.einstellungen.eingerichtet ? oeffnen() : schritt('daten')
+}
+
+async function formularAnmelden() {
+  const pw = passwortEingabe()
+  const benutzer = z.formular.benutzer.trim()
+  if (!benutzer || !pw.value) {
+    z.formular.fehler = 'Bitte Benutzername und Passwort eingeben.'; zeichne()
+    ;(benutzer ? pw : document.getElementById('benutzer'))?.focus()
+    return
+  }
+  z.beschaeftigt = true; z.formular.fehler = ''; z.fehler = ''; zeichne()
+  try {
+    const a = await invoke<Anmeldestand>('anmelden_formular', { benutzer, passwort: pw.value })
+    pw.value = ''
+    z.formular.fehlversuche = 0
+    z.katalog = null
+    z.beschaeftigt = false
+    if (z.schritt === 'einstellungen') { await einstellungenLaden(); return }
+    z.anmeldung = a
+    zeichne()
+    // Kontoname kurz zeigen, dann weiter (Daten bzw. Oberfläche).
+    setTimeout(() => { if (z.schritt === 'anmeldung' && z.anmeldung?.angemeldet) void weiterNachAnmeldung() }, WEITER_MS)
+  } catch (e) {
+    const t = fehlerText(e)
+    if (t === FORMULAR_FALSCH) z.formular.fehlversuche++
+    z.formular.fehler = formularFehler(t, z.formular.fehlversuche)
+    z.beschaeftigt = false; zeichne()
+    pw.focus(); pw.select()
+  }
 }
 
 async function anmeldungAbbrechen() {
@@ -576,6 +629,35 @@ function wartePanel(): HTMLElement {
   )
 }
 
+/** Benutzername, Passwort, „Anmelden“; Enter schickt ab (Formular-Submit). */
+function anmeldeFormular(): HTMLElement {
+  const benutzer = h('input', {
+    type: 'text', id: 'benutzer', value: z.formular.benutzer, autocomplete: 'username', spellcheck: 'false',
+    autocapitalize: 'off', disabled: z.beschaeftigt,
+    oninput: (e: Event) => { z.formular.benutzer = (e.target as HTMLInputElement).value },
+  }) as HTMLInputElement
+  const pw = passwortEingabe()
+  pw.disabled = z.beschaeftigt
+  // Fokus ins erste leere Feld, aber keinem anderen Feld wegnehmen.
+  queueMicrotask(() => {
+    const f = document.activeElement
+    if (!z.beschaeftigt && (!f || f === document.body)) (z.formular.benutzer ? pw : benutzer).focus()
+  })
+  return h('form', {
+    class: 'panel formular', 'aria-label': 'Mit Benutzername und Passwort anmelden', novalidate: true,
+    onsubmit: (e: Event) => { e.preventDefault(); void formularAnmelden() },
+  },
+    h('div', {}, h('label', { class: 'feldname', for: 'benutzer' }, 'Benutzername'), benutzer),
+    h('div', {}, h('label', { class: 'feldname', for: 'passwort' }, 'Passwort'), pw),
+    z.formular.fehler ? h('div', { class: 'meldung fehler', role: 'alert' }, z.formular.fehler) : null,
+    h('div', { class: 'knoepfe' },
+      h('button', { type: 'submit', class: 'primaer', disabled: z.beschaeftigt },
+        z.beschaeftigt ? h('span', {}, h('span', { class: 'dreht', 'aria-hidden': 'true' }), ' Anmelden …') : 'Anmelden')),
+    h('p', { class: 'nebentext' },
+      'Das Passwort geht nur an den Anmeldedienst Ihres Servers und wird auf diesem Rechner nicht gespeichert. Konten mit zweitem Faktor melden sich über „Im Browser anmelden“ an.'),
+  )
+}
+
 function ansichtAnmeldung(): HTMLElement {
   const a = z.anmeldung
   const eingerichtet = !!z.info?.einstellungen.eingerichtet
@@ -583,26 +665,31 @@ function ansichtAnmeldung(): HTMLElement {
     h('h1', {}, 'Anmelden'),
     h('p', { class: 'einleitung' },
       'Melden Sie sich einmal im Client an. Die Anmeldung gilt für die Datenpakete und für LeadLab im Fenster — ein zweites Login gibt es nicht. ',
-      'Sie hält wochenlang, bis jemand hier abmeldet oder die Verwaltung den Arbeitsplatz in der Anmeldung sperrt. Der Knopf öffnet die Anmeldeseite im Browser; danach geht es hier weiter.'),
+      'Sie hält wochenlang, bis jemand hier abmeldet oder die Verwaltung den Arbeitsplatz in der Anmeldung sperrt.',
+      formularZeigen(a) ? '' : ' Der Knopf öffnet die Anmeldeseite im Browser; danach geht es hier weiter.'),
     !a?.angemeldet && z.warten
       ? wartePanel()
-      : h('div', { class: 'panel' },
-        a?.angemeldet
-          ? h('p', { class: 'meldung ok' },
-            a.konto ? `Angemeldet als ${a.konto}. ` : 'Angemeldet. ',
-            'Die Anmeldung liegt verschlüsselt auf diesem Rechner.',
-            a.offline === false ? ' Dieses Konto darf keine Daueranmeldung; sie endet mit der Anmeldesitzung des Servers.' : null)
-          : h('p', { class: 'nebentext' }, 'Noch nicht angemeldet.'),
-      ),
+      : formularZeigen(a)
+        ? anmeldeFormular()
+        : h('div', { class: 'panel' },
+          a?.angemeldet
+            ? h('p', { class: 'meldung ok', role: 'status' },
+              a.konto ? `Angemeldet als ${a.konto}. ` : 'Angemeldet. ',
+              'Die Anmeldung liegt verschlüsselt auf diesem Rechner.',
+              a.offline === false ? ' Dieses Konto darf keine Daueranmeldung; sie endet mit der Anmeldesitzung des Servers.' : null)
+            : h('p', { class: 'nebentext' }, 'Noch nicht angemeldet.'),
+        ),
     fehlerFeld(),
     h('div', { class: 'knoepfe' },
       h('button', { class: 'sekundaer links', disabled: !!z.warten, onclick: () => schritt('server') }, 'Zurück'),
       a?.angemeldet
         ? h('button', { class: 'sekundaer', onclick: abmelden }, 'Abmelden')
         : !z.warten && h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: anmelden }, 'Im Browser anmelden'),
-      eingerichtet
-        ? h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: oeffnen }, 'LeadLab öffnen')
-        : h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: () => schritt('daten') }, 'Weiter'),
+      // Mit der Maske ist „Anmelden“ die Hauptaktion; nach dem Login geht es von selbst weiter.
+      formularZeigen(a) && !z.warten ? null
+        : eingerichtet
+          ? h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: oeffnen }, 'LeadLab öffnen')
+          : h('button', { class: 'primaer', disabled: !a?.angemeldet, onclick: () => schritt('daten') }, 'Weiter'),
     ),
   )
 }
@@ -795,7 +882,7 @@ function ansichtEinstellungen(): HTMLElement {
             ...eintrag('Tresor', a.tresor, true),
           ),
           z.sitzungHinweis ? h('p', { class: 'meldung ok', role: 'status' }, z.sitzungHinweis) : null,
-          !a.angemeldet && z.warten ? wartePanel() : null,
+          !a.angemeldet && z.warten ? wartePanel() : formularZeigen(a) ? anmeldeFormular() : null,
           h('div', { class: 'knoepfe' },
             a.angemeldet
               ? h('button', { class: 'sekundaer', disabled: z.beschaeftigt, onclick: einstellungAbmelden }, 'Abmelden')

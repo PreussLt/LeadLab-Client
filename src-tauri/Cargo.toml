@@ -31,6 +31,8 @@ base64 = "0.22"
 chacha20poly1305 = "0.10"
 getrandom = "0.3"
 open = "5"
+# Anmeldemaske (#804): Passwort nach dem Passwort-Grant überschreiben.
+zeroize = "1"
 # Auto-Update (CS9, #764): Manifest kommt aus client_update der Konfigurationsadresse.
 tauri-plugin-updater = "2"
 # Loopback-Server (CS7, #762): PMTiles-Verzeichnisse und LoD2-Manifeste sind gzip.
