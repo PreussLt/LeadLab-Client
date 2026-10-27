@@ -21,6 +21,8 @@
 pub mod ablage;
 pub mod aktualisierung;
 pub mod anmeldung;
+#[cfg(target_os = "linux")]
+pub mod eingabemethode;
 pub mod einstellungen;
 pub mod fehler;
 pub mod katalog;

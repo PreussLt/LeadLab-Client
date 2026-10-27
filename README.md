@@ -159,6 +159,26 @@ Schwebeknopf **✕ Vollbild verlassen** unten rechts; dann kommt die
 Menüleiste zurück. Knopf und Tasten navigieren auf `leadlab://vollbild-aus`,
 das der Client abfängt. Die Server-Oberfläche bekommt dafür keine IPC-Rechte.
 
+## Linux: keine Tastatureingabe
+
+Setzt die Desktop-Sitzung `GTK_IM_MODULE=ibus` (oder `fcitx`) und
+`XMODIFIERS=@im=ibus`, ohne dass der Daemon der Eingabemethode läuft, nimmt
+WebKitGTK in Eingabefeldern keine Tastendrücke an: Der Klick setzt den Fokus,
+getippt wird nichts (Hauptrepo #811). Der Client prüft das beim Start
+(`src-tauri/src/eingabemethode.rs`): Läuft unter der eigenen Nutzerkennung
+kein `ibus-daemon` bzw. `fcitx5`/`fcitx`, setzt er
+`GTK_IM_MODULE=gtk-im-context-simple` und entfernt `XMODIFIERS`; auf stderr
+steht dann eine Zeile mit `#811`. Läuft der Daemon, bleibt alles unverändert
+(der Debug-Build schreibt das ebenfalls mit). Das gilt für deb, AppImage und
+den Start aus dem Terminal gleichermaßen.
+
+Greift das nicht (etwa bei einer anderen Eingabemethode), hilft der Start mit
+der einfachen Eingabe von GTK:
+
+```bash
+env -u XMODIFIERS GTK_IM_MODULE=gtk-im-context-simple leadlab-client
+```
+
 ## Formate
 
 Die Schemata `leadlab-client/1` (Konfigurationsadresse) und `leadlab-daten/1`
@@ -241,6 +261,7 @@ ein.
 | `src-tauri/src/lokal.rs` | Loopback-Server für lokale Pakete, Initialisierungsskript |
 | `src-tauri/src/pmtiles.rs` | PMTiles v3 lesen (Hilbert-Ids, Blattverzeichnisse) |
 | `src-tauri/src/vollbild.rs` | Kommandozeile, Monitorwahl, Schwebeknopf-Skript |
+| `src-tauri/src/eingabemethode.rs` | Linux: ohne laufenden ibus-/fcitx-Daemon auf `gtk-im-context-simple` ausweichen |
 | `src-tauri/src/uebersicht.rs` | Pakettabelle, Paketstand nach dem Download, Paket entfernen |
 | `src-tauri/src/lib.rs` | Tauri-Befehle, Menü, Navigation zur Server-Oberfläche, Vollbild |
 
