@@ -3,8 +3,9 @@
 //! Der Nutzer gibt eine einzige Adresse ein. Endet sie auf `.json`, ist sie
 //! die Konfigurationsdatei selbst, sonst liegt die Datei unter
 //! `<adresse>/.well-known/leadlab-client.json`. Ohne Schema wird `https://`
-//! ergänzt; `http://` gilt nur für Loopback, `*.lead.lab`/`lead.lab` und
-//! private Adressbereiche (Tests im LAN, Feuerwehrhaus).
+//! ergänzt; `http://` gilt nur für Loopback, private Adressbereiche und Namen,
+//! die es im Internet nicht gibt (`lead.lab`, `.lan`, `.local` …, siehe
+//! [`LAN_ENDUNGEN`]) — Tests im LAN, Feuerwehrhaus.
 
 use std::net::IpAddr;
 
@@ -76,13 +77,34 @@ pub struct ClientKonfig {
     pub marke: Marke,
 }
 
+/// Namen, die im Internet nicht vergeben werden (#793): Wer sie benutzt, ist
+/// im eigenen Netz (eigener DNS, /etc/hosts, mDNS) — wie bei lead.lab und den
+/// privaten Adressen geht dort http. Eine Domain gilt, wenn sie gleich einer
+/// Endung ist oder darauf endet (`start.ffw.lan`).
+///
+/// - `lead.lab`: Vorgabe des Feuerwehrhauses (LEADLAB_DOMAIN)
+/// - `localhost`, `localdomain`: Loopback bzw. Vorgabe vieler Router
+/// - `lan`, `home`, `corp`: üblich in Heim- und Firmennetzen, von der ICANN
+///   nicht vergeben (home/corp wegen Namenskollisionen dauerhaft gesperrt)
+/// - `local` (mDNS, RFC 6762), `home.arpa` (RFC 8375), `internal` (ICANN 2024
+///   für private Netze reserviert)
+///
+/// Einzelne Namen ohne Punkt (`http://leadlab`) gelten nicht: Die
+/// Suchdomäne des Rechners kann daraus einen öffentlichen Namen machen.
+/// Spiegel: `werkzeug/update-manifest.mjs` (`LAN_ENDUNGEN`).
+pub const LAN_ENDUNGEN: &[&str] =
+    &["lead.lab", "localhost", "localdomain", "lan", "home", "corp", "local", "home.arpa", "internal"];
+
+/// Liegt der Name unter einer der [`LAN_ENDUNGEN`]?
+pub fn lan_name(domain: &str) -> bool {
+    let d = domain.trim_end_matches('.').to_ascii_lowercase();
+    LAN_ENDUNGEN.iter().any(|e| d == *e || d.strip_suffix(e).is_some_and(|r| r.ends_with('.')))
+}
+
 /// Darf diese Adresse ohne TLS angesprochen werden?
 pub fn http_erlaubt(url: &Url) -> bool {
     match url.host() {
-        Some(url::Host::Domain(d)) => {
-            let d = d.to_ascii_lowercase();
-            d == "localhost" || d == "lead.lab" || d.ends_with(".lead.lab")
-        }
+        Some(url::Host::Domain(d)) => lan_name(d),
         Some(url::Host::Ipv4(ip)) => {
             let ip = IpAddr::V4(ip);
             ip.is_loopback() || matches!(ip, IpAddr::V4(v4) if v4.is_private() || v4.is_link_local())
@@ -98,7 +120,8 @@ pub fn pruefe_schema(url: &Url) -> Result<(), Fehler> {
         "https" => Ok(()),
         "http" if http_erlaubt(url) => Ok(()),
         "http" => Err(Fehler::Eingabe(format!(
-            "{} ist unverschlüsselt. http:// geht nur im LAN (localhost, lead.lab, private Adressen).",
+            "{} ist unverschlüsselt. http:// geht nur im eigenen Netz: private Adressen und Namen \
+             unter lead.lab, .lan, .local, .internal, .home.arpa (und localhost). Sonst bitte https.",
             url
         ))),
         s => Err(Fehler::Eingabe(format!("Schema „{s}“ wird nicht unterstützt."))),
@@ -221,6 +244,65 @@ mod tests {
         assert!(konfig_url("http://8.8.8.8").is_err());
         assert!(konfig_url("ftp://example.de").is_err());
         assert!(konfig_url("   ").is_err());
+    }
+
+    /// Eigene Feuerwehrhaus-Namen ohne TLS (#793): Endungen, die es im
+    /// Internet nicht gibt, gelten wie lead.lab.
+    #[test]
+    fn eigene_lan_namen_duerfen_http() {
+        for a in [
+            "http://start.ffw.lan",
+            "http://ffw.lan:8080/",
+            "http://uebung.ffw.lan/",
+            "http://auth.ffw.lan/realms/leadlab",
+            "http://leadlab.local",
+            "http://leadlab.internal",
+            "http://leadlab.ffw.home.arpa",
+            "http://leadlab.localdomain",
+            "http://leadlab.home",
+            "http://leadlab.corp",
+            "http://START.FFW.LAN",
+            "http://ffw.lan./",
+            "http://lead.lab",
+            "http://uebung.lead.lab",
+        ] {
+            let u = Url::parse(a).unwrap();
+            assert!(http_erlaubt(&u), "{a}");
+            assert!(pruefe_schema(&u).is_ok(), "{a}");
+        }
+        // Ohne Schema eingegeben: dort läuft meist kein TLS.
+        assert_eq!(konfig_url("start.ffw.lan").unwrap().as_str(), "http://start.ffw.lan/.well-known/leadlab-client.json");
+    }
+
+    #[test]
+    fn oeffentliche_namen_bleiben_https() {
+        for a in [
+            "http://lan.example.de",
+            "http://ffw-lan.de",
+            "http://leadlab.local.example.de",
+            "http://lanx",
+            "http://leadlab",
+            "http://evillead.lab",
+            "http://internal.com",
+        ] {
+            let u = Url::parse(a).unwrap();
+            assert!(!http_erlaubt(&u), "{a}");
+        }
+        let f = pruefe_schema(&Url::parse("http://lan.example.de").unwrap()).unwrap_err().to_string();
+        assert!(f.contains(".lan"), "Fehlertext nennt die erlaubten Namen: {f}");
+    }
+
+    /// Das Update-Manifest prüft seine Basis mit derselben Liste.
+    #[test]
+    fn lan_endungen_wie_im_update_manifest() {
+        let js = include_str!("../../werkzeug/update-manifest.mjs");
+        let zeile = js.lines().find(|l| l.starts_with("export const LAN_ENDUNGEN")).expect("LAN_ENDUNGEN im Manifest-Werkzeug");
+        let liste: Vec<&str> = zeile
+            .split_once('[')
+            .and_then(|(_, r)| r.split_once(']'))
+            .map(|(l, _)| l.split(',').map(|e| e.trim().trim_matches('\'')).collect())
+            .unwrap();
+        assert_eq!(liste, LAN_ENDUNGEN);
     }
 
     #[test]

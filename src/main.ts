@@ -580,7 +580,9 @@ function ansichtServer(): HTMLElement {
       h('div', { class: 'zeile' }, eingabe,
         h('button', { class: 'sekundaer', onclick: serverPruefen, disabled: z.beschaeftigt || !z.eingabe.trim() },
           z.beschaeftigt ? h('span', { class: 'dreht', 'aria-label': 'Prüfe' }) : 'Prüfen')),
-      h('p', { id: 'adresse-hilfe', class: 'nebentext' }, 'Im Feuerwehrhaus-Netz geht auch ', h('span', { class: 'mono' }, 'lead.lab'), '.'),
+      // Ohne TLS nur Namen, die es im Internet nicht gibt (konfig.rs LAN_ENDUNGEN, #793).
+      h('p', { id: 'adresse-hilfe', class: 'nebentext' }, 'Im Feuerwehrhaus-Netz geht auch ', h('span', { class: 'mono' }, 'lead.lab'),
+        ' oder ein eigener Name wie ', h('span', { class: 'mono' }, 'start.ffw.lan'), ' (ohne TLS nur unter .lan, .local, .internal, .home.arpa oder mit privater IP-Adresse).'),
     ),
     fehlerFeld(),
     k && h('div', { class: 'panel meldung ok' },

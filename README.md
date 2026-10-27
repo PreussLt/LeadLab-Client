@@ -16,7 +16,15 @@ dieses Grundgerüst ist CS1 #756). Dort ist dieses Repo als Submodul
    `leadlab.landkreis-beispiel.de`. Er lädt
    `https://<adresse>/.well-known/leadlab-client.json` (oder direkt eine
    angegebene `.json`) und zeigt Name, Landkreis, Version und Datenzugang.
-   `http://` gilt nur für `localhost`, `lead.lab` und private Adressen.
+   `http://` gilt nur im eigenen Netz: für private Adressen und für Namen,
+   die es im Internet nicht gibt — `localhost`, `lead.lab`, `.lan`,
+   `.localdomain`, `.home`, `.corp`, `.local`, `.home.arpa`, `.internal`
+   (`LAN_ENDUNGEN` in `src-tauri/src/konfig.rs`, Hauptrepo #793). Ein
+   Feuerwehrhaus mit eigenen Hosts ohne TLS (`LEADLAB_DOMAIN=ffw.lan`) gibt
+   also `start.ffw.lan` ein. Eine öffentliche Domain ohne TLS nimmt der
+   Client nicht an, auch wenn sie per `/etc/hosts` ins LAN zeigt: Er kann
+   das nicht vom Internet unterscheiden, und Passwort und Token liefen
+   unverschlüsselt. Dann die IP-Adresse oder einen der Namen oben nehmen.
 2. **Anmeldung** (wenn der Server einen Anmeldedienst nennt): Ein Login gilt
    für die Datenpakete **und** für die Oberfläche im Fenster. Die
    **Anmeldemaske** fragt Benutzername und Passwort ab und tauscht sie direkt

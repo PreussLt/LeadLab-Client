@@ -28,6 +28,18 @@ describe('update-manifest', () => {
     expect(() => fuerServer(LATEST, 'http://lead.lab/daten/client/')).not.toThrow()
     expect(() => fuerServer(LATEST, 'http://leadlab.example.de/daten/client/')).toThrow(/https/)
     expect(() => fuerServer({ version: '1' }, 'https://x.de/')).toThrow(/latest.json/)
+  })
+
+  it('http auch für eigene LAN-Namen und private Adressen wie im Client (#793)', () => {
+    for (const b of ['http://start.ffw.lan/daten/client/', 'http://ffw.lan:8080/daten/client', 'http://leadlab.local/',
+      'http://leadlab.internal/', 'http://leadlab.ffw.home.arpa/', 'http://uebung.lead.lab/', 'http://localhost:11214/',
+      'http://192.168.1.20/daten/client/', 'http://10.0.0.5:8080/', 'http://127.0.0.1/']) {
+      expect(() => fuerServer(LATEST, b), b).not.toThrow()
+    }
+    for (const b of ['http://lan.example.de/', 'http://ffw-lan.de/', 'http://leadlab/', 'http://8.8.8.8/',
+      'http://evillead.lab/', 'ftp://ffw.lan/']) {
+      expect(() => fuerServer(LATEST, b), b).toThrow(/https/)
+    }
     expect(() => fuerServer({ version: '1', platforms: { a: { url: 'https://x/y' } } }, 'https://x.de/')).toThrow(/signature/)
   })
 })

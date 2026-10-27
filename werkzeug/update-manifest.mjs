@@ -15,14 +15,38 @@
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
+/**
+ * Namen, die im Internet nicht vergeben werden — Spiegel von `LAN_ENDUNGEN`
+ * in src-tauri/src/konfig.rs (#793). Dort steht die Begründung je Eintrag.
+ */
+export const LAN_ENDUNGEN = ['lead.lab', 'localhost', 'localdomain', 'lan', 'home', 'corp', 'local', 'home.arpa', 'internal']
+
+/** Darf `adresse` ohne TLS angesprochen werden? Gleiche Regel wie `http_erlaubt` im Client. */
+export function httpErlaubt(adresse) {
+  let host
+  try {
+    host = new URL(adresse).hostname.toLowerCase().replace(/\.+$/, '')
+  } catch {
+    return false
+  }
+  const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/)
+  if (v4) {
+    const [a, b] = v4.slice(1).map(Number)
+    // Loopback, privat (RFC 1918), link-local
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+  }
+  if (host === '[::1]') return true
+  return LAN_ENDUNGEN.some((e) => host === e || host.endsWith(`.${e}`))
+}
+
 /** latest.json → update.json mit Dateien unter `basis`. */
 export function fuerServer(latest, basis) {
   if (!latest || typeof latest.version !== 'string' || typeof latest.platforms !== 'object') {
     throw new Error('kein latest.json der tauri-action (version, platforms fehlen)')
   }
   const b = basis.endsWith('/') ? basis : `${basis}/`
-  if (!/^https:\/\//.test(b) && !/^http:\/\/(localhost|127\.0\.0\.1|([a-z0-9-]+\.)*lead\.lab)(:\d+)?\//.test(b)) {
-    throw new Error(`Basis ${basis} muss https sein (http nur für lead.lab/localhost)`)
+  if (!/^https:\/\//.test(b) && !(/^http:\/\//.test(b) && httpErlaubt(b))) {
+    throw new Error(`Basis ${basis} muss https sein (http nur im eigenen Netz: private Adressen, lead.lab, .lan, .local, .internal, .home.arpa)`)
   }
   const platforms = {}
   for (const [ziel, p] of Object.entries(latest.platforms)) {
