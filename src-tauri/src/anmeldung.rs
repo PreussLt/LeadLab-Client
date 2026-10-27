@@ -370,8 +370,9 @@ pub const FORMULAR_AUS: &str = "Der Server hat die Anmeldung per Formular abgesc
 /// `invalid_grant` „Invalid user credentials“; die Sperre nach Fehlversuchen
 /// meldet Keycloak 26 genauso (ältere Fassungen „Account temporarily
 /// disabled“); offene Pflichtaktion „Account is not fully set up“; Direct
-/// Grants aus `unauthorized_client`; Admins lehnt der Ablauf `leadlab
-/// direktzugang` mit 401 und einer HTML-Seite ab.
+/// Grants aus `unauthorized_client`; weist ein Schritt des Ablaufs `leadlab
+/// direktzugang` ab (etwa ein fehlender OTP-Code), antwortet Keycloak 401 mit
+/// einer HTML-Seite.
 pub fn formular_fehler(status: u16, f: Option<FehlerAntwort>) -> Fehler {
     let text = match f {
         Some(f) if f.error == "invalid_grant" => {

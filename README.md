@@ -24,9 +24,8 @@ dieses Grundgerüst ist CS1 #756). Dort ist dieses Repo als Submodul
    `leadlab-client`, `scope=openid offline_access`; Hauptrepo #804). Das
    Passwort wird nie gespeichert oder protokolliert und im Kern nach dem
    Aufruf überschrieben (`zeroize`). Falsches Passwort, Sperre nach fünf
-   Fehlversuchen, Konten mit Admin-Rolle oder OTP und ein Server ohne
-   Formular bekommen eigene Meldungen; die letzten verweisen auf den
-   Browser. Die Maske lässt sich serverseitig abschalten
+   Fehlversuchen, Konten mit OTP und ein Server ohne Formular bekommen
+   eigene Meldungen; die letzten verweisen auf den Browser. Die Maske lässt sich serverseitig abschalten
    (`anmeldung.formular: false` in der Konfigurationsadresse). Der zweite
    Knopf *Im Browser anmelden* öffnet den Systembrowser auf die Keycloak-Anmeldung des Servers
    (öffentlicher Client `leadlab-client`, Authorization Code + PKCE S256), der
