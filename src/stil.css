@@ -2,14 +2,14 @@
  * Stil des Assistenten. Werte aus dem LeadLab-Hauptrepo übernommen:
  * Farb-Tokens aus apps/gemeinsam/src/basis.css (Kanal-Tripel, dunkel als
  * Vorgabe, hell über prefers-color-scheme), ffw-rot #CC0000 als Primärfarbe,
- * Open Sans für Text (seit #830 im Hauptrepo, vorher Jost), IBM Plex Mono
- * nur für codierte Werte (Adressen, Größen, Versionen). Schriften lokal gebündelt — der Client lädt nichts aus dem Netz.
+ * Open Sans für alles (seit #830 im Hauptrepo, vorher Jost; bis #853 lief
+ * daneben IBM Plex Mono für codierte Werte wie Adressen, Größen, Versionen —
+ * abgeschafft). Schrift lokal gebündelt — der Client lädt nichts aus dem Netz.
  */
 @import '@fontsource/open-sans/400.css';
 @import '@fontsource/open-sans/500.css';
 @import '@fontsource/open-sans/600.css';
 @import '@fontsource/open-sans/700.css';
-@import '@fontsource/ibm-plex-mono/400.css';
 
 :root {
   --farbe-flaeche: 3 7 18;
@@ -64,7 +64,8 @@ body {
   *:not(.dreht) { animation: none !important; transition: none !important; }
 }
 
-.mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+/* Altname (#853): codierte Werte stehen in der Leseschrift, nur die Ziffern bleiben gleich breit. */
+.mono { font-variant-numeric: tabular-nums; }
 .nebentext { color: rgb(var(--farbe-nebentext)); }
 .kritisch { color: rgb(var(--kritisch)); }
 .erledigt { color: rgb(var(--erledigt)); }
@@ -179,6 +180,7 @@ h2 { margin: 0; color: rgb(var(--farbe-titel)); font-size: 20px; font-weight: 60
 details summary { cursor: pointer; color: rgb(var(--farbe-nebentext)); min-height: 44px; display: flex; align-items: center; }
 pre.roh {
   margin: 0; padding: 12px 14px; max-height: 360px; overflow: auto; font-size: 13px;
+  font-family: inherit; /* kein Browser-Monospace: eine Schrift (#853) */
   background: rgb(var(--farbe-feld)); border: 1px solid rgb(var(--farbe-rand)); border-radius: 8px; color: rgb(var(--farbe-text));
 }
 .tabelle-rahmen { overflow-x: auto; }
@@ -201,7 +203,7 @@ button.klein { min-height: 44px; padding: 0 14px; }
 .warten { display: flex; flex-direction: column; gap: 16px; }
 .warten p, .meldung p { margin: 0; }
 .meldung .knoepfe { justify-content: flex-start; margin-top: 12px; }
-input.mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 14px; }
+input.mono { font-size: 14px; }
 
 /* ── Anmeldemaske (#804) ────────────────────────────────────────── */
 .formular { display: flex; flex-direction: column; gap: 16px; max-width: 520px; }
