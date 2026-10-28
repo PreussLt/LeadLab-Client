@@ -29,6 +29,7 @@ pub mod katalog;
 pub mod konfig;
 pub mod laden;
 pub mod lokal;
+pub mod nebenfenster;
 pub mod oberflaeche;
 pub mod pmtiles;
 pub mod tresor;
@@ -37,14 +38,14 @@ pub mod vollbild;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, Url};
+use tauri::webview::{NewWindowFeatures, NewWindowResponse, PageLoadEvent};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, Url, WebviewUrl, WindowEvent};
 
 use ablage::Ablage;
 use einstellungen::Einstellungen;
@@ -858,7 +859,10 @@ async fn oeffnen_nach(app: &AppHandle, ziel: Option<Url>) -> Result<(), Fehler> 
 /// - Kommt dasselbe Cookie zurück, lebt die Sitzung — dann hat das Fenster
 ///   das Cookie nicht angenommen, und es geht über den Einmalcode.
 /// - Mehr als drei Umleitungen in 30 s führen in den Assistenten statt im Kreis.
-async fn login_abgefangen(app: AppHandle, ziel: Url) {
+///
+/// `fenster` ist das Fenster, in dem die Umleitung auftrat (Hauptfenster oder
+/// Nebenfenster, #859); dorthin geht es nach der Erneuerung weiter.
+async fn login_abgefangen(app: AppHandle, ziel: Url, fenster: String) {
     let z = app.state::<AppZustand>();
     let anlaeufe = {
         let mut u = z.umleitungen.lock().unwrap();
@@ -889,7 +893,7 @@ async fn login_abgefangen(app: AppHandle, ziel: Url) {
                 || alt.map(|a| a.wert == neu.wert).unwrap_or(false)
                 || anlaeufe >= 2;
             let adresse = if ueber_code { oberflaeche::client_login_url(&k.oberflaeche, &neu.einmalcode, &ziel) } else { ziel };
-            if navigiere(&app, adresse).is_err() {
+            if navigiere_in(&app, &fenster, adresse).is_err() {
                 zurueck_zum_assistenten(&app, "anmeldung");
             }
         }
@@ -960,7 +964,11 @@ fn vollbild_einstellung_umschalten(app: &AppHandle) {
 }
 
 fn navigiere(app: &AppHandle, ziel: Url) -> Result<(), Fehler> {
-    let w = app.get_webview_window("main").ok_or_else(|| Fehler::Eingabe("Hauptfenster fehlt.".into()))?;
+    navigiere_in(app, "main", ziel)
+}
+
+fn navigiere_in(app: &AppHandle, fenster: &str, ziel: Url) -> Result<(), Fehler> {
+    let w = app.get_webview_window(fenster).ok_or_else(|| Fehler::Eingabe("Fenster fehlt.".into()))?;
     w.navigate(ziel).map_err(|e| Fehler::Eingabe(e.to_string()))
 }
 
@@ -979,6 +987,136 @@ fn zurueck_zum_assistenten(app: &AppHandle, schritt: &str) {
     }
 }
 
+/// Lokale Seiten (Assistent), die keine Server-Skripte bekommen.
+fn lokale_seiten(cfg: &tauri::Config) -> Vec<String> {
+    let mut ausgenommen = vec![
+        "tauri://localhost".to_string(),
+        "http://tauri.localhost".to_string(),
+        "https://tauri.localhost".to_string(),
+    ];
+    if let Some(dev) = &cfg.build.dev_url {
+        ausgenommen.push(dev.origin().ascii_serialization());
+    }
+    ausgenommen
+}
+
+/// Login-Umleitung der eigenen Oberfläche (AD4): Der Client meldet an, nicht
+/// Keycloak im Fenster. Ohne Anmeldedienst läuft sie normal. `true` = abgefangen.
+fn login_abfangen(handle: &AppHandle, u: &Url, fenster: &str) -> bool {
+    let Some(z) = handle.try_state::<AppZustand>() else { return false };
+    let k = z.einstellungen.lock().unwrap().konfig.clone();
+    if let Some(k) = k.filter(|k| k.anmeldung.is_some()) {
+        let hosts = oberflaechen_hosts(&k);
+        let refs: Vec<&Url> = hosts.iter().collect();
+        if let Some(ziel) = oberflaeche::login_ziel(u, &refs) {
+            tauri::async_runtime::spawn(login_abgefangen(handle.clone(), ziel, fenster.to_string()));
+            return true;
+        }
+    }
+    false
+}
+
+/// `window.open` / `target="_blank"` aus der Oberfläche (#859, Konzept
+/// Desktop-App §4.4): internes Ziel → Nebenfenster derselben Sitzung,
+/// externes → Systembrowser, sonst nichts. Läuft im Hauptthread.
+fn neues_fenster(app: &AppHandle, u: Url, features: NewWindowFeatures) -> NewWindowResponse<tauri::Wry> {
+    let hosts = app
+        .try_state::<AppZustand>()
+        .and_then(|z| z.einstellungen.lock().unwrap().konfig.clone())
+        .map(|k| oberflaechen_hosts(&k))
+        .unwrap_or_default();
+    match nebenfenster::entscheide(&u, &hosts) {
+        nebenfenster::Ziel::Nebenfenster => match nebenfenster_bauen(app, features) {
+            Ok(window) => NewWindowResponse::Create { window },
+            Err(e) => {
+                eprintln!("Nebenfenster für {u} lässt sich nicht öffnen: {e}");
+                NewWindowResponse::Deny
+            }
+        },
+        nebenfenster::Ziel::Browser => {
+            if let Err(e) = browser_oeffnen(&u) {
+                eprintln!("{e}");
+            }
+            NewWindowResponse::Deny
+        }
+        nebenfenster::Ziel::Ablehnen => NewWindowResponse::Deny,
+    }
+}
+
+static NEBENFENSTER: AtomicUsize = AtomicUsize::new(1);
+
+/// Nebenfenster wie `nebenfenster.py` der Desktop-App: verwandtes Webview
+/// des Aufrufers (`window_features` — unter Linux dieselbe Web-Sitzung, also
+/// dieselben Cookies), auf dem zweiten Bildschirm, ohne Menü, mit
+/// „✕ Schließen“/Strg+W/F11 aus dem Skript. Login-Abfang (AD4) und neue
+/// Fenster gelten hier wie im Hauptfenster; es schließt mit dem Hauptfenster.
+/// Die Adresse lädt das Webview selbst in das zurückgegebene Fenster.
+fn nebenfenster_bauen(app: &AppHandle, features: NewWindowFeatures) -> tauri::Result<tauri::WebviewWindow> {
+    let label = format!("{}{}", nebenfenster::PRAEFIX, NEBENFENSTER.fetch_add(1, Ordering::SeqCst));
+    let ausgenommen = lokale_seiten(app.config());
+    let leer: Url = "about:blank".parse().expect("about:blank");
+    let mut b = tauri::WebviewWindowBuilder::new(app, &label, WebviewUrl::External(leer))
+        .title("LeadLab")
+        .inner_size(1180.0, 800.0)
+        .min_inner_size(640.0, 480.0)
+        .window_features(features);
+    // Zweiter Bildschirm, wenn es einen gibt. Unter Wayland setzt der
+    // Compositor das Fenster selbst (#165) — ein Versuch, keine Zusage.
+    if let Some(haupt) = app.get_webview_window("main") {
+        let schirme = haupt.available_monitors().unwrap_or_default();
+        let eigener = haupt.current_monitor().ok().flatten().map(|m| *m.position());
+        let index = eigener.and_then(|p| schirme.iter().position(|m| *m.position() == p));
+        if let Some(m) = nebenfenster::zweitschirm(&schirme, index) {
+            let f = m.work_area();
+            let (x, y, w, h) = nebenfenster::platz(f.position.x, f.position.y, f.size.width, f.size.height, m.scale_factor());
+            b = b.position(x, y).inner_size(w, h);
+        }
+    }
+    if let Some(z) = app.try_state::<AppZustand>() {
+        b = b.initialization_script(&lokal::initialisierung(&z.lokal, &ausgenommen));
+    }
+    let h_nav = app.clone();
+    let h_neu = app.clone();
+    let l_nav = label.clone();
+    let w = b
+        .initialization_script(&nebenfenster::skript(&ausgenommen))
+        .on_document_title_changed(|w, titel| {
+            let t = titel.trim();
+            let _ = w.set_title(&if t.is_empty() { "LeadLab".to_string() } else { format!("{t} – LeadLab") });
+        })
+        .on_navigation(move |u| {
+            let aktion = nebenfenster::aktion(u);
+            if aktion.is_some() || vollbild::ist_ausstieg(u) {
+                let h = h_nav.clone();
+                let l = l_nav.clone();
+                let aus = vollbild::ist_ausstieg(u);
+                tauri::async_runtime::spawn(async move {
+                    let Some(w) = h.get_webview_window(&l) else { return };
+                    match aktion {
+                        Some(nebenfenster::Aktion::Schliessen) => {
+                            let _ = w.close();
+                        }
+                        Some(nebenfenster::Aktion::VollbildUmschalten) => {
+                            let an = w.is_fullscreen().unwrap_or(false);
+                            let _ = w.set_fullscreen(!an);
+                        }
+                        None if aus => {
+                            let _ = w.set_fullscreen(false);
+                        }
+                        None => {}
+                    }
+                });
+                return false;
+            }
+            !login_abfangen(&h_nav, u, &l_nav)
+        })
+        .on_new_window(move |u, f| neues_fenster(&h_neu, u, f))
+        .build()?;
+    // Das Menü gehört dem Hauptfenster (Assistent, Server, Abmelden).
+    let _ = w.remove_menu();
+    Ok(w)
+}
+
 /// Hauptfenster aus tauri.conf.json (dort `create: false`), mit dem
 /// Initialisierungsskript `window.__LEADLAB_CLIENT__` für die
 /// Server-Oberfläche. Die lokale Assistentenseite bleibt ausgenommen; IPC hat
@@ -992,15 +1130,9 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
         .find(|w| w.label == "main")
         .cloned()
         .ok_or_else(|| tauri::Error::WindowNotFound)?;
-    let mut ausgenommen = vec![
-        "tauri://localhost".to_string(),
-        "http://tauri.localhost".to_string(),
-        "https://tauri.localhost".to_string(),
-    ];
-    if let Some(dev) = &app.config().build.dev_url {
-        ausgenommen.push(dev.origin().ascii_serialization());
-    }
+    let ausgenommen = lokale_seiten(app.config());
     let handle = app.handle().clone();
+    let h_neu = app.handle().clone();
     let lokale_seiten = ausgenommen.clone();
     tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
         .initialization_script(&lokal::initialisierung(lokal, &ausgenommen))
@@ -1013,21 +1145,10 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
                 tauri::async_runtime::spawn(async move { vollbild_setzen(&h, false) });
                 return false;
             }
-            // Login-Umleitung der eigenen Oberfläche (AD4): Der Client meldet
-            // an, nicht Keycloak im Fenster. Ohne Anmeldedienst läuft sie normal.
-            if let Some(z) = handle.try_state::<AppZustand>() {
-                let k = z.einstellungen.lock().unwrap().konfig.clone();
-                if let Some(k) = k.filter(|k| k.anmeldung.is_some()) {
-                    let hosts = oberflaechen_hosts(&k);
-                    let refs: Vec<&Url> = hosts.iter().collect();
-                    if let Some(ziel) = oberflaeche::login_ziel(u, &refs) {
-                        tauri::async_runtime::spawn(login_abgefangen(handle.clone(), ziel));
-                        return false;
-                    }
-                }
-            }
-            true
+            !login_abfangen(&handle, u, "main")
         })
+        // Ausgliedern, Einspiel-Bildschirm, Beamer, externe Links (#859).
+        .on_new_window(move |u, f| neues_fenster(&h_neu, u, f))
         // Nach jedem Laden erfährt die Seite, ob sie im Vollbild steht.
         .on_page_load(move |w, p| {
             if p.event() == PageLoadEvent::Finished {
@@ -1078,6 +1199,16 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Nebenfenster schließen mit dem Hauptfenster (#859).
+        .on_window_event(|w, ev| {
+            if w.label() == "main" && matches!(ev, WindowEvent::Destroyed) {
+                for (label, n) in w.app_handle().webview_windows() {
+                    if label.starts_with(nebenfenster::PRAEFIX) {
+                        let _ = n.destroy();
+                    }
+                }
+            }
+        })
         .setup(move |app| {
             let einstellungen = konfig_ordner(app.handle()).map(|o| Einstellungen::lesen(&o)).unwrap_or_default();
             let vollbild_start = einstellungen.vollbild;

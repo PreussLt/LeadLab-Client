@@ -167,6 +167,22 @@ Schwebeknopf **✕ Vollbild verlassen** unten rechts; dann kommt die
 Menüleiste zurück. Knopf und Tasten navigieren auf `leadlab://vollbild-aus`,
 das der Client abfängt. Die Server-Oberfläche bekommt dafür keine IPC-Rechte.
 
+## Nebenfenster und externe Links
+
+Die Oberfläche gliedert Ansichten mit `window.open(…, '_blank')` aus
+(Reiter ausgliedern, Einspiel-Bildschirm, Stabssicht, Beamer,
+Hydrantenkarte). Der Client öffnet dafür ein **Nebenfenster** derselben
+Sitzung wie die Desktop-App (Hauptrepo #859, Konzept Desktop-App §4.4): auf
+dem zweiten Bildschirm, wenn es einen gibt (unter Wayland setzt der
+Compositor das Fenster selbst), ohne Menüleiste, mit **✕ Schließen** unten
+rechts, Strg+W und F11 für Vollbild. `window.close()` der Seite schließt es;
+mit dem Hauptfenster gehen alle Nebenfenster zu. Intern ist, was auf dem Host
+der Oberfläche oder der Startzentrale liegt, dazu `about:blank`
+(Druckfenster). Externe Ziele (`http`, `https`, `mailto`) öffnet der
+Systembrowser, alles andere wird verworfen. Knopf und Tasten laufen über
+`leadlab://fenster-schliessen` und `leadlab://vollbild-umschalten`; IPC hat
+auch das Nebenfenster nicht.
+
 ## Linux: keine Tastatureingabe
 
 Setzt die Desktop-Sitzung `GTK_IM_MODULE=ibus` (oder `fcitx`) und
@@ -269,6 +285,7 @@ ein.
 | `src-tauri/src/lokal.rs` | Loopback-Server für lokale Pakete, Initialisierungsskript |
 | `src-tauri/src/pmtiles.rs` | PMTiles v3 lesen (Hilbert-Ids, Blattverzeichnisse) |
 | `src-tauri/src/vollbild.rs` | Kommandozeile, Monitorwahl, Schwebeknopf-Skript |
+| `src-tauri/src/nebenfenster.rs` | Neue Fenster: Zielentscheidung, Zweitschirm, Schließknopf-Skript |
 | `src-tauri/src/eingabemethode.rs` | Linux: ohne laufenden ibus-/fcitx-Daemon auf `gtk-im-context-simple` ausweichen |
 | `src-tauri/src/uebersicht.rs` | Pakettabelle, Paketstand nach dem Download, Paket entfernen |
 | `src-tauri/src/lib.rs` | Tauri-Befehle, Menü, Navigation zur Server-Oberfläche, Vollbild |
