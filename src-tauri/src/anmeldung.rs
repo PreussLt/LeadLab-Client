@@ -11,8 +11,9 @@
 //!   jemand abmeldet oder ein Admin die Offline-Sitzung widerruft. Ohne die
 //!   Realm-Rolle gibt Keycloak ein normales Refresh-Token (kein Fehler).
 //! - Alle Tokens liegen im verschlüsselten **Tresor** im Konfigurationsordner
-//!   (tresor.rs), nicht mehr im Schlüsselbund. Ein Refresh-Token aus dem
-//!   Schlüsselbund der Fassung CS4 wird einmal übernommen und dort gelöscht.
+//!   (tresor.rs). Die einmalige Übernahme eines Refresh-Tokens aus dem
+//!   Schlüsselbund der Fassung CS4 ist seit #803 entfallen (Crate `keyring`
+//!   entfernt): Wer noch einen alten Eintrag hat, meldet sich einmal neu an.
 //! - Das Access-Token öffnet `/daten/` (Zielgruppe `leadlab-daten`) und
 //!   trägt `aud=leadlab-bff`, damit der BFF daraus die Sitzung der
 //!   Oberfläche machen kann (AD3/AD4).
@@ -25,9 +26,8 @@
 //!   (`zeroize`; die Kopie im HTTP-Rumpf von reqwest erreicht das nicht).
 //!   Zwei-Faktor und Identity-Provider bleiben dem Browser-Weg vorbehalten.
 
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering as AtomOrdnung};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -42,8 +42,6 @@ use crate::fehler::Fehler;
 use crate::konfig::{pruefe_schema, Anmeldung as AnmeldeKonfig};
 use crate::tresor::{Eintrag, Tresor};
 
-/// Dienstname im Schlüsselbund (nur noch für die Übernahme aus CS4).
-pub const DIENST: &str = "de.leadlab.client";
 /// Pfad der Rückrufadresse auf dem Loopback.
 pub const RUECKRUF: &str = "/rueckruf";
 /// So lange wartet der Client auf den Rückruf aus dem Browser.
@@ -528,62 +526,6 @@ fn jetzt() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-// ── Schlüsselbund (Altbestand aus CS4) ──────────────────────────────────────
-
-/// Ablage der Fassung CS4: das Refresh-Token im Schlüsselbund. Wird nur noch
-/// gelesen (Übernahme in den Tresor) und gelöscht.
-pub trait Altbestand: Send + Sync {
-    fn lesen(&self, konto: &str) -> Result<Option<String>, Fehler>;
-    fn loeschen(&self, konto: &str) -> Result<(), Fehler>;
-}
-
-/// Schlüsselbund des Betriebssystems (Crate `keyring`).
-pub struct Schluesselbund;
-
-fn bund_eintrag(konto: &str) -> Result<keyring::Entry, Fehler> {
-    keyring::Entry::new(DIENST, konto).map_err(|e| Fehler::Eingabe(format!("Schlüsselbund: {e}")))
-}
-
-impl Altbestand for Schluesselbund {
-    fn lesen(&self, konto: &str) -> Result<Option<String>, Fehler> {
-        match bund_eintrag(konto)?.get_password() {
-            Ok(w) => Ok(Some(w)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(Fehler::Eingabe(format!("Schlüsselbund nicht lesbar: {e}"))),
-        }
-    }
-    fn loeschen(&self, konto: &str) -> Result<(), Fehler> {
-        match bund_eintrag(konto)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(Fehler::Eingabe(format!("Schlüsselbund: {e}"))),
-        }
-    }
-}
-
-/// Altbestand im Speicher (Tests; leer = nichts zu übernehmen).
-#[derive(Default)]
-pub struct Speicher(Mutex<std::collections::BTreeMap<String, String>>);
-
-impl Speicher {
-    pub fn schreiben(&self, konto: &str, wert: &str) {
-        self.0.lock().unwrap().insert(konto.into(), wert.into());
-    }
-}
-
-impl Altbestand for Speicher {
-    fn lesen(&self, konto: &str) -> Result<Option<String>, Fehler> {
-        Ok(self.0.lock().unwrap().get(konto).cloned())
-    }
-    fn loeschen(&self, konto: &str) -> Result<(), Fehler> {
-        self.0.lock().unwrap().remove(konto);
-        Ok(())
-    }
-}
-
-pub fn konto(k: &AnmeldeKonfig) -> String {
-    format!("{}|{}", k.issuer.as_str().trim_end_matches('/'), k.client_id)
-}
-
 // ── Sitzung ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
@@ -602,13 +544,10 @@ pub struct Status {
 /// Token-Verwaltung eines Clients über den Tresor.
 pub struct Sitzung {
     tresor: Tresor,
-    alt: Arc<dyn Altbestand>,
     /// Erneuern, Anmelden und Abmelden nacheinander: drei Download-Ströme
     /// tauschen das Refresh-Token sonst dreimal (und mit Rotation zweimal
     /// mit einem schon verbrauchten).
     sperre: tokio::sync::Mutex<()>,
-    /// Konten, für die der Altbestand in diesem Lauf schon geprüft wurde.
-    geprueft: Mutex<BTreeSet<String>>,
 }
 
 fn passt(e: &Eintrag, k: &AnmeldeKonfig) -> bool {
@@ -616,42 +555,15 @@ fn passt(e: &Eintrag, k: &AnmeldeKonfig) -> bool {
 }
 
 impl Sitzung {
-    pub fn neu(tresor: Tresor, alt: Arc<dyn Altbestand>) -> Self {
-        Sitzung { tresor, alt, sperre: tokio::sync::Mutex::new(()), geprueft: Mutex::new(BTreeSet::new()) }
+    pub fn neu(tresor: Tresor) -> Self {
+        Sitzung { tresor, sperre: tokio::sync::Mutex::new(()) }
     }
 
     pub fn tresor_pfad(&self) -> std::path::PathBuf {
         self.tresor.pfad()
     }
 
-    /// Einmal je Lauf und Konto: ein Refresh-Token aus dem Schlüsselbund
-    /// (Fassung CS4) in den Tresor übernehmen, dann den Eintrag löschen.
-    fn migrieren(&self, k: &AnmeldeKonfig) {
-        let kt = konto(k);
-        if !self.geprueft.lock().unwrap().insert(kt.clone()) {
-            return;
-        }
-        if self.tresor.lesen().filter(|e| passt(e, k)).is_some() {
-            let _ = self.alt.loeschen(&kt);
-            return;
-        }
-        let Ok(Some(refresh)) = self.alt.lesen(&kt) else { return };
-        let e = Eintrag {
-            issuer: k.issuer.as_str().trim_end_matches('/').to_string(),
-            client_id: k.client_id.clone(),
-            refresh_offline: ist_offline(&refresh, None),
-            refresh_bis: ablauf(&refresh),
-            refresh_token: refresh,
-            angemeldet_seit: jetzt(),
-            ..Default::default()
-        };
-        if self.tresor.schreiben(&e).is_ok() {
-            let _ = self.alt.loeschen(&kt);
-        }
-    }
-
     fn eintrag(&self, k: &AnmeldeKonfig) -> Option<Eintrag> {
-        self.migrieren(k);
         self.tresor.lesen().filter(|e| passt(e, k) && !e.refresh_token.is_empty())
     }
 
@@ -728,7 +640,6 @@ impl Sitzung {
             let _g = self.sperre.lock().await;
             self.uebernehmen(k, &t, None)?;
         }
-        let _ = self.alt.loeschen(&konto(k));
         Ok(self.status(k))
     }
 
@@ -755,7 +666,6 @@ impl Sitzung {
             let _g = self.sperre.lock().await;
             self.uebernehmen(k, &t, None)?;
         }
-        let _ = self.alt.loeschen(&konto(k));
         Ok(self.status(k))
     }
 
@@ -787,8 +697,8 @@ impl Sitzung {
     }
 
     /// Abmelden: Refresh-Token beim Anmeldedienst widerrufen (ein Netzfehler
-    /// hält das lokale Abmelden nicht auf), Tresor löschen, einen alten
-    /// Schlüsselbund-Eintrag entfernen. Ergebnis: ob der Widerruf geklappt hat.
+    /// hält das lokale Abmelden nicht auf), Tresor löschen. Ergebnis: ob der
+    /// Widerruf geklappt hat.
     pub async fn abmelden(&self, client: &reqwest::Client, k: &AnmeldeKonfig) -> Result<bool, Fehler> {
         let _g = self.sperre.lock().await;
         let mut widerrufen_ok = false;
@@ -800,7 +710,6 @@ impl Sitzung {
             }
         }
         self.tresor.loeschen()?;
-        let _ = self.alt.loeschen(&konto(k));
         Ok(widerrufen_ok)
     }
 }
@@ -810,6 +719,7 @@ mod tests {
     use super::*;
     use crate::tresor::Schluessel;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     fn jwt_mit(inhalt: &str) -> String {
@@ -940,8 +850,8 @@ mod tests {
         AnmeldeKonfig { issuer: issuer.clone(), client_id: "leadlab-client".into(), scopes: vec!["openid".into()], formular: true }
     }
 
-    fn sitzung(ordner: &std::path::Path, alt: Arc<Speicher>) -> Sitzung {
-        Sitzung::neu(Tresor::neu(ordner, Schluessel::Fest([9; 32])), alt)
+    fn sitzung(ordner: &std::path::Path) -> Sitzung {
+        Sitzung::neu(Tresor::neu(ordner, Schluessel::Fest([9; 32])))
     }
 
     /// „Browser“: folgt der Anmeldeadresse wie Keycloak nach dem Login —
@@ -1105,7 +1015,7 @@ mod tests {
         let kc = keycloak().await;
         let k = konfig(&kc.issuer);
         let d = tempfile::tempdir().unwrap();
-        let s = sitzung(d.path(), Arc::default());
+        let s = sitzung(d.path());
         let client = reqwest::Client::new();
         let w = Arc::new(Warten::neu());
         let kein_browser = |_: &Url| -> Result<(), Fehler> { Err(Fehler::Eingabe("Browser lässt sich nicht öffnen (xdg-open fehlt).".into())) };
@@ -1130,7 +1040,7 @@ mod tests {
         let kc = keycloak().await;
         let k = konfig(&kc.issuer);
         let d = tempfile::tempdir().unwrap();
-        let s = sitzung(d.path(), Arc::default());
+        let s = sitzung(d.path());
         let client = reqwest::Client::new();
         assert_eq!(s.token(&client, &k).await.unwrap(), None);
         assert_eq!(s.status(&k), Status::default());
@@ -1147,7 +1057,7 @@ mod tests {
 
         // Frisches Access-Token kommt aus dem Tresor, auch nach einem Neustart.
         let t1 = s.token(&client, &k).await.unwrap().unwrap();
-        let s2 = sitzung(d.path(), Arc::default());
+        let s2 = sitzung(d.path());
         assert_eq!(s2.token(&client, &k).await.unwrap().unwrap(), t1);
         assert_eq!(kc.refreshs.load(Ordering::SeqCst), 0);
         // Anderer Anmeldedienst → nicht angemeldet.
@@ -1162,7 +1072,7 @@ mod tests {
         let k = konfig(&kc.issuer);
         let d = tempfile::tempdir().unwrap();
         let tresor = Tresor::neu(d.path(), Schluessel::Fest([9; 32]));
-        let s = sitzung(d.path(), Arc::default());
+        let s = sitzung(d.path());
         let client = reqwest::Client::new();
         s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5), &Warten::neu()).await.unwrap();
         let seit = s.status(&k).angemeldet_seit;
@@ -1194,7 +1104,7 @@ mod tests {
         let k = konfig(&kc.issuer);
         let d = tempfile::tempdir().unwrap();
         let tresor = Tresor::neu(d.path(), Schluessel::Fest([9; 32]));
-        let s = sitzung(d.path(), Arc::default());
+        let s = sitzung(d.path());
         let client = reqwest::Client::new();
         s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5), &Warten::neu()).await.unwrap();
         // Admin widerruft die Offline-Sitzung: das Token im Tresor gilt nicht mehr.
@@ -1212,17 +1122,14 @@ mod tests {
         let kc = keycloak().await;
         let k = konfig(&kc.issuer);
         let d = tempfile::tempdir().unwrap();
-        let alt = Arc::new(Speicher::default());
-        let s = sitzung(d.path(), alt.clone());
+        let s = sitzung(d.path());
         let client = reqwest::Client::new();
         s.anmelden(&client, &k, &browser(&kc), Duration::from_secs(5), &Warten::neu()).await.unwrap();
         let refresh = kc.gueltig.lock().unwrap().clone();
-        alt.schreiben(&konto(&k), "alter-eintrag");
         assert!(s.abmelden(&client, &k).await.unwrap());
         assert_eq!(*kc.widerrufen.lock().unwrap(), vec![refresh]);
         assert!(!s.status(&k).angemeldet);
         assert!(!s.tresor_pfad().exists());
-        assert_eq!(alt.lesen(&konto(&k)).unwrap(), None, "Schlüsselbund-Eintrag entfernt");
         // Ohne Anmeldung: kein Widerruf, kein Fehler.
         assert!(!s.abmelden(&client, &k).await.unwrap());
         assert_eq!(kc.widerrufen.lock().unwrap().len(), 1);
@@ -1241,31 +1148,10 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let s = sitzung(d.path(), Arc::default());
+        let s = sitzung(d.path());
         assert!(s.status(&k).angemeldet);
         assert!(!s.abmelden(&reqwest::Client::new(), &k).await.unwrap());
         assert!(!s.status(&k).angemeldet);
-    }
-
-    #[tokio::test]
-    async fn uebernahme_aus_dem_schluesselbund() {
-        let kc = keycloak().await;
-        let k = konfig(&kc.issuer);
-        let d = tempfile::tempdir().unwrap();
-        let alt = Arc::new(Speicher::default());
-        // Fassung CS4: normales Refresh-Token im Schlüsselbund, beim Server gültig.
-        let r = jwt_mit(&format!(r#"{{"exp":{},"typ":"Refresh"}}"#, jetzt() + 43_200));
-        *kc.gueltig.lock().unwrap() = r.clone();
-        alt.schreiben(&konto(&k), &r);
-        let s = sitzung(d.path(), alt.clone());
-        let st = s.status(&k);
-        assert!(st.angemeldet && !st.offline);
-        assert_eq!(alt.lesen(&konto(&k)).unwrap(), None, "Eintrag nach der Übernahme gelöscht");
-        let e = Tresor::neu(d.path(), Schluessel::Fest([9; 32])).lesen().unwrap();
-        assert_eq!(e.refresh_token, r);
-        // Damit lässt sich erneuern wie gewohnt.
-        assert!(s.token(&reqwest::Client::new(), &k).await.unwrap().is_some());
-        assert_eq!(kc.refreshs.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1285,9 +1171,7 @@ mod tests {
         let kc = keycloak().await;
         let k = konfig(&kc.issuer);
         let d = tempfile::tempdir().unwrap();
-        let alt = Arc::new(Speicher::default());
-        alt.schreiben(&konto(&k), "alter-eintrag");
-        let s = sitzung(d.path(), alt.clone());
+        let s = sitzung(d.path());
         let client = reqwest::Client::new();
         let passwort = zeroize::Zeroizing::new(String::from("richtig"));
         let st = s.anmelden_mit_passwort(&client, &k, "  kbm.mueller ", &passwort).await.unwrap();
@@ -1299,7 +1183,6 @@ mod tests {
         assert_eq!(e.refresh_token, *kc.gueltig.lock().unwrap());
         assert!(e.refresh_offline && e.id_token.is_some() && !e.access_token.is_empty() && e.access_bis > jetzt());
         assert_eq!(e.konto.as_deref(), Some("kbm.mueller"));
-        assert_eq!(alt.lesen(&konto(&k)).unwrap(), None, "Schlüsselbund-Altlast entfernt");
         // Erneuern und Abmelden laufen wie gewohnt.
         let mut e2 = e.clone();
         e2.access_bis = 0;
@@ -1313,7 +1196,7 @@ mod tests {
         let kc = keycloak().await;
         let k = konfig(&kc.issuer);
         let d = tempfile::tempdir().unwrap();
-        let s = sitzung(d.path(), Arc::default());
+        let s = sitzung(d.path());
         let client = reqwest::Client::new();
         let fehler = |benutzer: &'static str, passwort: &'static str| {
             let (s, client, k) = (&s, &client, &k);
@@ -1349,7 +1232,7 @@ mod tests {
         let Ok(iss) = std::env::var("LEADLAB_TEST_KEYCLOAK") else { return };
         let k = konfig(&Url::parse(&iss).unwrap());
         let d = tempfile::tempdir().unwrap();
-        let s = sitzung(d.path(), Arc::default());
+        let s = sitzung(d.path());
         let c = reqwest::Client::new();
         let b = std::env::var("LEADLAB_TEST_BENUTZER").unwrap();
         let p = zeroize::Zeroizing::new(std::env::var("LEADLAB_TEST_PASSWORT").unwrap());

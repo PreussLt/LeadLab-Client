@@ -37,10 +37,6 @@ zeroize = "1"
 tauri-plugin-updater = "2"
 # Loopback-Server (CS7, #762): PMTiles-Verzeichnisse und LoD2-Manifeste sind gzip.
 flate2 = "1"
-# Nur noch für die Übernahme eines Refresh-Tokens aus dem Schlüsselbund der
-# Fassung CS4 in den Tresor (AD2, #798); entfällt, wenn alle Arbeitsplätze
-# übernommen haben.
-keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
 
 # Geräteschlüssel des Tresors unter Windows: DPAPI im Nutzerbereich (AD2, #798).
 [target.'cfg(windows)'.dependencies]

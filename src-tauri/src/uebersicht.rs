@@ -3,7 +3,7 @@
 //!
 //! Hier stehen die reinen Teile — welche Pakete lokal liegen, was nach einem
 //! Download in die Zustandsdatei kommt, was beim Entfernen eines Pakets
-//! wegfällt. Netz, Fenster und Schlüsselbund sammelt `lib.rs` dazu.
+//! wegfällt. Netz, Fenster und Anmeldung sammelt `lib.rs` dazu.
 
 use std::collections::{BTreeMap, BTreeSet};
 

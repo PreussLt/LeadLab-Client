@@ -227,7 +227,6 @@ pub async fn abmelden_beidseitig(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anmeldung::Speicher;
     use crate::tresor::{Eintrag, Schluessel, Tresor};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -416,7 +415,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let sitzung = Sitzung::neu(Tresor::neu(d.path(), Schluessel::Fest([5; 32])), Arc::new(Speicher::default()));
+        let sitzung = Sitzung::neu(Tresor::neu(d.path(), Schluessel::Fest([5; 32])));
         assert!(sitzung.status(&k).angemeldet);
         let pp = p.clone();
         let widerrufen = abmelden_beidseitig(
@@ -440,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn abmelden_ohne_server_loescht_trotzdem() {
         let d = tempfile::tempdir().unwrap();
-        let sitzung = Sitzung::neu(Tresor::neu(d.path(), Schluessel::Fest([5; 32])), Arc::new(Speicher::default()));
+        let sitzung = Sitzung::neu(Tresor::neu(d.path(), Schluessel::Fest([5; 32])));
         let geloescht = Arc::new(Mutex::new(false));
         let g = geloescht.clone();
         let tot = url("http://127.0.0.1:9/");

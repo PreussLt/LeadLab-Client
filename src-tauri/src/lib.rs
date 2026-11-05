@@ -1225,10 +1225,10 @@ pub fn run() {
                 abbruch: Arc::new(AtomicBool::new(false)),
                 laeuft: Arc::new(AtomicBool::new(false)),
                 startseite: Mutex::new(None),
-                sitzung: Arc::new(anmeldung::Sitzung::neu(
-                    tresor::Tresor::neu(konfig_ordner(app.handle())?, tresor::Schluessel::Geraet),
-                    Arc::new(anmeldung::Schluesselbund),
-                )),
+                sitzung: Arc::new(anmeldung::Sitzung::neu(tresor::Tresor::neu(
+                    konfig_ordner(app.handle())?,
+                    tresor::Schluessel::Geraet,
+                ))),
                 lokal,
                 update: Mutex::new(None),
                 argumente: vollbild::argumente(std::env::args().skip(1)),

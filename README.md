@@ -56,8 +56,9 @@ dieses Grundgerüst ist CS1 #756). Dort ist dieses Repo als Submodul
    der Client das Access-Token per Refresh-Token und schreibt das Ergebnis
    (auch ein rotiertes Refresh-Token) zurück; lehnt Keycloak ab, wird der
    Tresor geleert. *Abmelden* widerruft das Refresh-Token beim Anmeldedienst
-   (RFC 7009) und löscht den Tresor. Ein Refresh-Token aus dem Schlüsselbund
-   älterer Fassungen wird beim ersten Start übernommen und dort gelöscht.
+   (RFC 7009) und löscht den Tresor. Den Schlüsselbund des Betriebssystems
+   nutzt der Client nicht mehr (Crate `keyring` seit LeadLab #803 entfernt):
+   Wer noch einen Eintrag der Fassung CS4 hat, meldet sich einmal neu an.
    Vor jeder Datei holt der Downloader ein frisches Access-Token.
 3. **Daten:** Der Baum zeigt Region › Gruppe (Gelände, Karte, Luftbild,
    3D-Gebäude, Stammdaten) › Paket, jeweils mit Größe und Lizenz. Grundpakete
@@ -277,7 +278,7 @@ ein.
 | `src-tauri/src/katalog.rs` | Katalog, Auswahl auflösen, Plan gegen die Ablage |
 | `src-tauri/src/ablage.rs` | Datenordner, sichere Pfade, Zustand, freier Speicher |
 | `src-tauri/src/laden.rs` | Downloader mit Range, SHA-256 und Spiegeln |
-| `src-tauri/src/anmeldung.rs` | OIDC PKCE mit Loopback-Rückruf, `offline_access`, Erneuerung, Widerruf, Übernahme aus dem Schlüsselbund |
+| `src-tauri/src/anmeldung.rs` | OIDC PKCE mit Loopback-Rückruf, `offline_access`, Erneuerung, Widerruf, Anmeldemaske |
 | `src-tauri/src/oberflaeche.rs` | Sitzung der Oberfläche aus der Anmeldung: Cookie, Einmalcode, Login-Umleitung, beidseitiges Abmelden |
 | `src-tauri/src/tresor.rs` | Verschlüsselter Token-Tresor im Konfigurationsordner (ChaCha20-Poly1305, DPAPI/0600) |
 | `src-tauri/src/aktualisierung.rs` | Update-Prüfung gegen `client_update` (tauri-plugin-updater) |
