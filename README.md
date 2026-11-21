@@ -162,10 +162,11 @@ leadlab-client --monitor 1     # Vollbild auf dem zweiten Monitor
 
 Ohne `--vollbild`/`--fenster` gilt *Beim Start im Vollbild* aus dem Menü
 (`einstellungen.json`, Feld `vollbild`). Ohne `--monitor` nimmt der Client den
-Monitor, auf dem der Mauszeiger steht. Hinaus geht es mit F11, Esc (nur wenn
-kein Dialog offen ist und kein Eingabefeld den Fokus hat) oder dem
-Schwebeknopf **✕ Vollbild verlassen** unten rechts; dann kommt die
-Menüleiste zurück. Knopf und Tasten navigieren auf `leadlab://vollbild-aus`,
+Monitor, auf dem der Mauszeiger steht; unter Wayland (COSMIC, GNOME) kennt er
+den Mauszeiger nicht und bleibt auf dem Monitor des Fensters (Hauptrepo
+#1352). Hinaus geht es mit F11, Esc (nur wenn kein Dialog offen ist und kein
+Eingabefeld den Fokus hat) oder dem Schwebeknopf **✕ Vollbild verlassen**
+unten rechts; dann kommt die Menüleiste zurück. Knopf und Tasten navigieren auf `leadlab://vollbild-aus`,
 das der Client abfängt. Die Server-Oberfläche bekommt dafür keine IPC-Rechte.
 
 ## Nebenfenster und externe Links

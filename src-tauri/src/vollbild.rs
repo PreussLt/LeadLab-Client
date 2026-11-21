@@ -61,15 +61,88 @@ pub fn im_vollbild(a: &Argumente, einstellung: bool) -> bool {
     a.vollbild.unwrap_or(einstellung)
 }
 
+/// Wohin das Vollbild geht.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ziel {
+    /// Auf diesen Monitor (Index in `available_monitors`).
+    Monitor(usize),
+    /// Ohne Output: der Compositor nimmt den Monitor des Fensters.
+    Fenster,
+}
+
 /// Monitor fürs Vollbild wie `waehle_schirm` der Desktop-App:
-/// `--monitor N`, sonst der mit dem Mauszeiger, sonst der erste.
-pub fn waehle_monitor<T: Clone>(schirme: &[T], wunsch: Option<usize>, zeiger: Option<T>) -> Option<T> {
-    if let Some(n) = wunsch {
-        if n < schirme.len() {
-            return Some(schirme[n].clone());
-        }
+/// `--monitor N`, sonst der mit dem Mauszeiger, sonst der des Fensters.
+///
+/// Unter Wayland kennt der Client den Mauszeiger nicht — tao meldet dort fest
+/// `(0, 0)`, also immer den Monitor oben links (#1352). Dort gilt darum ohne
+/// `--monitor` der Monitor des Fensters.
+pub fn vollbild_ziel(anzahl: usize, wunsch: Option<usize>, zeiger: Option<usize>, wayland: bool) -> Ziel {
+    if let Some(n) = wunsch.filter(|&n| n < anzahl) {
+        return Ziel::Monitor(n);
     }
-    zeiger.or_else(|| schirme.first().cloned())
+    match zeiger.filter(|&z| !wayland && z < anzahl) {
+        Some(z) => Ziel::Monitor(z),
+        None => Ziel::Fenster,
+    }
+}
+
+/// Läuft GTK unter Wayland? Wie GDK selbst: `GDK_BACKEND` (erster Eintrag
+/// der Liste) entscheidet, sonst ein gesetztes `WAYLAND_DISPLAY`.
+pub fn ist_wayland(gdk_backend: Option<&str>, wayland_display: Option<&str>) -> bool {
+    let erstes = gdk_backend.and_then(|b| b.split(',').map(str::trim).find(|t| !t.is_empty() && *t != "*"));
+    match erstes {
+        Some(b) => b == "wayland",
+        None => wayland_display.map(|d| !d.trim().is_empty()).unwrap_or(false),
+    }
+}
+
+/// Physisches Rechteck eines Monitors (`Monitor::position`/`size`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rechteck {
+    pub x: i32,
+    pub y: i32,
+    pub breite: u32,
+    pub hoehe: u32,
+}
+
+impl Rechteck {
+    fn enthaelt(&self, x: i32, y: i32) -> bool {
+        self.x <= x && x < self.x + self.breite as i32 && self.y <= y && y < self.y + self.hoehe as i32
+    }
+}
+
+/// Punkt für `set_fullscreen_on_monitor`, unter dem Tauri den Zielmonitor
+/// findet.
+///
+/// tauri-runtime-wry nimmt den **ersten** Monitor, dessen physisches Rechteck
+/// den Punkt enthält. tao rechnet diese Rechtecke als logische Geometrie mal
+/// eigener Skalierung; bei gemischter Skalierung (Laptop 150 % links, Monitor
+/// 100 % rechts daneben) überdeckt das Rechteck des ersten den Ursprung des
+/// zweiten, und `Monitor::position()` landet auf dem falschen Schirm (#1352).
+/// `None`, wenn frühere Rechtecke den Zielmonitor ganz verdecken.
+pub fn sondierpunkt(rechtecke: &[Rechteck], ziel: usize) -> Option<(i32, i32)> {
+    let r = *rechtecke.get(ziel)?;
+    // Jede freie Teilfläche des Ziels beginnt an einer Kante: der eigenen
+    // oder der eines anderen Rechtecks. Diese Kanten genügen als Kandidaten.
+    let kanten = |eigen: i32, laenge: u32, fremd: &dyn Fn(&Rechteck) -> (i32, u32)| {
+        let ende = eigen + laenge as i32;
+        let mut k = vec![eigen, eigen + laenge as i32 / 2];
+        for o in rechtecke {
+            let (a, l) = fremd(o);
+            k.extend([a, a + l as i32]);
+        }
+        k.retain(|&v| eigen <= v && v < ende);
+        k.sort_unstable();
+        k.dedup();
+        k
+    };
+    let xs = kanten(r.x, r.breite, &|o| (o.x, o.breite));
+    let ys = kanten(r.y, r.hoehe, &|o| (o.y, o.hoehe));
+    // Mitte zuerst, dann die Kanten.
+    let mitte = (r.x + r.breite as i32 / 2, r.y + r.hoehe as i32 / 2);
+    std::iter::once(mitte)
+        .chain(xs.iter().flat_map(|&x| ys.iter().map(move |&y| (x, y))))
+        .find(|&(x, y)| rechtecke.iter().position(|o| o.enthaelt(x, y)) == Some(ziel))
 }
 
 /// Ist das eine Ausstiegs-Anforderung der Seite?
@@ -148,13 +221,73 @@ mod tests {
 
     #[test]
     fn monitorwahl_wie_waehle_schirm() {
-        let schirme = ["links", "mitte", "rechts"];
-        assert_eq!(waehle_monitor(&schirme, Some(2), Some("links")), Some("rechts"), "--monitor gewinnt");
-        assert_eq!(waehle_monitor(&schirme, Some(0), Some("mitte")), Some("links"));
-        assert_eq!(waehle_monitor(&schirme, None, Some("mitte")), Some("mitte"), "sonst der Mauszeiger");
-        assert_eq!(waehle_monitor(&schirme, Some(7), Some("mitte")), Some("mitte"), "ungültige Nummer: Mauszeiger");
-        assert_eq!(waehle_monitor(&schirme, Some(7), None), Some("links"), "sonst der erste");
-        assert_eq!(waehle_monitor::<&str>(&[], Some(0), None), None);
+        assert_eq!(vollbild_ziel(3, Some(2), Some(0), false), Ziel::Monitor(2), "--monitor gewinnt");
+        assert_eq!(vollbild_ziel(3, Some(0), Some(1), false), Ziel::Monitor(0));
+        assert_eq!(vollbild_ziel(3, None, Some(1), false), Ziel::Monitor(1), "sonst der Mauszeiger");
+        assert_eq!(vollbild_ziel(3, Some(7), Some(1), false), Ziel::Monitor(1), "ungültige Nummer: Mauszeiger");
+        assert_eq!(vollbild_ziel(3, Some(7), None, false), Ziel::Fenster, "sonst der des Fensters");
+        assert_eq!(vollbild_ziel(0, Some(0), None, false), Ziel::Fenster);
+    }
+
+    /// #1352: Unter Wayland meldet tao den Zeiger fest bei (0, 0) — das ist
+    /// immer der Monitor oben links, nicht der mit dem Mauszeiger.
+    #[test]
+    fn wayland_ohne_mauszeiger() {
+        assert_eq!(vollbild_ziel(2, None, Some(0), true), Ziel::Fenster, "Zeiger zählt unter Wayland nicht");
+        assert_eq!(vollbild_ziel(2, Some(1), Some(0), true), Ziel::Monitor(1), "--monitor gilt weiter");
+        assert_eq!(vollbild_ziel(2, Some(5), None, true), Ziel::Fenster);
+    }
+
+    #[test]
+    fn wayland_erkennen_wie_gdk() {
+        assert!(ist_wayland(None, Some("wayland-1")));
+        assert!(!ist_wayland(None, None));
+        assert!(!ist_wayland(None, Some("")));
+        assert!(!ist_wayland(Some("x11"), Some("wayland-1")), "GDK_BACKEND erzwingt X11");
+        assert!(ist_wayland(Some("wayland,x11"), None));
+        assert!(!ist_wayland(Some("x11,wayland"), Some("wayland-1")));
+        assert!(ist_wayland(Some("*"), Some("wayland-0")), "* = Standardreihenfolge");
+    }
+
+    /// Nachbau von `find_monitor_for_position` aus tauri-runtime-wry 2.12:
+    /// erster Monitor, dessen Rechteck den Punkt enthält.
+    fn tauri_findet(rechtecke: &[Rechteck], p: (i32, i32)) -> Option<usize> {
+        rechtecke.iter().position(|r| r.enthaelt(p.0, p.1))
+    }
+
+    /// #1352, Regieplatz: eDP-1 2560×1600 bei 150 % (GDK rundet auf 2) an
+    /// 0,0, logisch 1707 breit; DP-6 3440×1440 bei 100 % an 1707,0.
+    #[test]
+    fn sondierpunkt_bei_gemischter_skalierung() {
+        let schirme = [
+            Rechteck { x: 0, y: 0, breite: 3414, hoehe: 2134 },
+            Rechteck { x: 1707, y: 0, breite: 3440, hoehe: 1440 },
+        ];
+        for ziel in 0..schirme.len() {
+            let p = sondierpunkt(&schirme, ziel).expect("Punkt");
+            assert_eq!(tauri_findet(&schirme, p), Some(ziel), "Monitor {ziel} über {p:?}");
+        }
+        // Mit GDK-Skalierung 1 (kein Überlappen) ebenso.
+        let schirme = [Rechteck { x: 0, y: 0, breite: 1707, hoehe: 1067 }, schirme[1]];
+        assert_eq!(tauri_findet(&schirme, sondierpunkt(&schirme, 1).unwrap()), Some(1));
+    }
+
+    #[test]
+    fn sondierpunkt_findet_freie_ecken() {
+        // Zielmonitor rechts unten nur teilweise verdeckt, links davon ein großer.
+        let schirme = [
+            Rechteck { x: 0, y: 0, breite: 4000, hoehe: 1000 },
+            Rechteck { x: 3000, y: 500, breite: 1920, hoehe: 1080 },
+            Rechteck { x: -1920, y: 0, breite: 1920, hoehe: 1080 },
+        ];
+        for ziel in 0..schirme.len() {
+            let p = sondierpunkt(&schirme, ziel).expect("Punkt");
+            assert_eq!(tauri_findet(&schirme, p), Some(ziel));
+        }
+        // Ganz verdeckt: kein Punkt, der Client nimmt dann das Fenster.
+        let verdeckt = [Rechteck { x: 0, y: 0, breite: 4000, hoehe: 2000 }, Rechteck { x: 10, y: 10, breite: 100, hoehe: 100 }];
+        assert_eq!(sondierpunkt(&verdeckt, 1), None);
+        assert_eq!(sondierpunkt(&verdeckt, 5), None);
     }
 
     #[test]

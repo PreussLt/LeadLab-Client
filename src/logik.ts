@@ -210,7 +210,7 @@ export function startverhalten(einstellung: boolean, args: { vollbild?: boolean 
   const modus = `${an ? 'Vollbild' : 'Fenster'}${quelle}`
   const monitor = args.monitor !== null && args.monitor !== undefined
     ? `Monitor ${args.monitor + 1} (--monitor ${args.monitor})`
-    : 'Monitor mit dem Mauszeiger'
+    : 'Monitor mit dem Mauszeiger, unter Wayland der des Fensters'
   return { modus, monitor }
 }
 

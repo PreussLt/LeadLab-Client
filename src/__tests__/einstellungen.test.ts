@@ -51,8 +51,8 @@ describe('aktualisierungen', () => {
 
 describe('startverhalten', () => {
   it('Kommandozeile schlägt die Einstellung und sagt es dazu', () => {
-    expect(startverhalten(true, {})).toEqual({ modus: 'Vollbild', monitor: 'Monitor mit dem Mauszeiger' })
-    expect(startverhalten(true, { vollbild: false })).toEqual({ modus: 'Fenster (diesmal --fenster)', monitor: 'Monitor mit dem Mauszeiger' })
+    expect(startverhalten(true, {})).toEqual({ modus: 'Vollbild', monitor: 'Monitor mit dem Mauszeiger, unter Wayland der des Fensters' })
+    expect(startverhalten(true, { vollbild: false })).toEqual({ modus: 'Fenster (diesmal --fenster)', monitor: 'Monitor mit dem Mauszeiger, unter Wayland der des Fensters' })
     expect(startverhalten(false, { vollbild: true, monitor: 1 })).toEqual({ modus: 'Vollbild (diesmal --vollbild)', monitor: 'Monitor 2 (--monitor 1)' })
     expect(startverhalten(false, { vollbild: null, monitor: null }).modus).toBe('Fenster')
   })

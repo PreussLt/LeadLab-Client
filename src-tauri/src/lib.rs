@@ -919,13 +919,37 @@ fn vollbild_setzen(app: &AppHandle, an: bool) {
     *z.vollbild_seit.lock().unwrap() = Some(Instant::now());
     if an {
         let schirme = w.available_monitors().unwrap_or_default();
-        // Unter Wayland kennt der Client die Zeigerposition oft nicht; dann
-        // bleibt es beim ersten Monitor bzw. dem des Fensters (#165).
-        let zeiger = w.cursor_position().ok().and_then(|p| w.monitor_from_point(p.x, p.y).ok().flatten());
-        match vollbild::waehle_monitor(&schirme, z.argumente.monitor, zeiger) {
-            Some(m) => {
-                let p = m.position();
-                let _ = w.set_fullscreen_on_monitor(PhysicalPosition::new(p.x as f64, p.y as f64));
+        let rechtecke: Vec<vollbild::Rechteck> = schirme
+            .iter()
+            .map(|m| vollbild::Rechteck { x: m.position().x, y: m.position().y, breite: m.size().width, hoehe: m.size().height })
+            .collect();
+        let wayland = cfg!(target_os = "linux")
+            && vollbild::ist_wayland(
+                std::env::var("GDK_BACKEND").ok().as_deref(),
+                std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+            );
+        // Mauszeiger nur unter X11 (unter Wayland meldet tao fest 0,0, #1352).
+        // `cursor_position` ist physisch, `monitor_from_point` will logisch.
+        let zeiger = if wayland {
+            None
+        } else {
+            let f = w.scale_factor().unwrap_or(1.0).max(0.1);
+            w.cursor_position()
+                .ok()
+                .and_then(|p| w.monitor_from_point(p.x / f, p.y / f).ok().flatten())
+                .and_then(|m| schirme.iter().position(|s| s.position() == m.position() && s.size() == m.size()))
+        };
+        let punkt = match vollbild::vollbild_ziel(schirme.len(), z.argumente.monitor, zeiger, wayland) {
+            vollbild::Ziel::Monitor(n) => vollbild::sondierpunkt(&rechtecke, n),
+            vollbild::Ziel::Fenster => None,
+        };
+        // Ohne Punkt (Monitor des Fensters, oder Ziel verdeckt) Vollbild ohne
+        // Output — nie stumm im Fenster bleiben.
+        match punkt {
+            Some((x, y)) => {
+                if w.set_fullscreen_on_monitor(PhysicalPosition::new(x as f64, y as f64)).is_err() {
+                    let _ = w.set_fullscreen(true);
+                }
             }
             None => {
                 let _ = w.set_fullscreen(true);
