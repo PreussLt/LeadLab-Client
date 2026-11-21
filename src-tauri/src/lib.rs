@@ -21,6 +21,7 @@
 pub mod ablage;
 pub mod aktualisierung;
 pub mod anmeldung;
+pub mod betriebsmodus;
 #[cfg(target_os = "linux")]
 pub mod eingabemethode;
 pub mod einstellungen;
@@ -96,6 +97,8 @@ struct AppZustand {
     /// Ergebnis einer Anmeldung im Client-Fenster, das die neu geladene
     /// Assistentenseite einmal abholt.
     anmelde_meldung: Mutex<Option<String>>,
+    /// Betriebsmodus (#1377): Rollenfenster für Lagekarte und Simulation.
+    betrieb: Mutex<betriebsmodus::Betrieb>,
 }
 
 fn jetzt() -> u64 {
@@ -1044,12 +1047,16 @@ fn login_abfangen(handle: &AppHandle, u: &Url, fenster: &str) -> bool {
 /// Desktop-App §4.4): internes Ziel → Nebenfenster derselben Sitzung,
 /// externes → Systembrowser, sonst nichts. Läuft im Hauptthread.
 fn neues_fenster(app: &AppHandle, u: Url, features: NewWindowFeatures) -> NewWindowResponse<tauri::Wry> {
-    let hosts = app
-        .try_state::<AppZustand>()
-        .and_then(|z| z.einstellungen.lock().unwrap().konfig.clone())
-        .map(|k| oberflaechen_hosts(&k))
-        .unwrap_or_default();
+    let hosts = eigene_hosts(app);
     match nebenfenster::entscheide(&u, &hosts) {
+        // Im Betriebsmodus wandert der Inhalt in den nächsten freien
+        // Bereitschirm (#1377, `freier_traeger`). Ein neues Fenster ginge
+        // unter Wayland beim Mauszeiger auf, nicht auf dem eingerichteten
+        // Monitor (#165). Die Frontends öffnen mit `noopener`, ein Navigieren
+        // verliert also nichts.
+        nebenfenster::Ziel::Nebenfenster if betriebsmodus::passt_in_rollenfenster(&u) && in_rollenfenster(app, &u) => {
+            NewWindowResponse::Deny
+        }
         nebenfenster::Ziel::Nebenfenster => match nebenfenster_bauen(app, features) {
             Ok(window) => NewWindowResponse::Create { window },
             Err(e) => {
@@ -1065,6 +1072,39 @@ fn neues_fenster(app: &AppHandle, u: Url, features: NewWindowFeatures) -> NewWin
         }
         nebenfenster::Ziel::Ablehnen => NewWindowResponse::Deny,
     }
+}
+
+/// Oberfläche und Startzentrale aus der Client-Konfiguration.
+fn eigene_hosts(app: &AppHandle) -> Vec<Url> {
+    app.try_state::<AppZustand>()
+        .and_then(|z| z.einstellungen.lock().unwrap().konfig.clone())
+        .map(|k| oberflaechen_hosts(&k))
+        .unwrap_or_default()
+}
+
+/// Ausgegliederten Inhalt in den nächsten freien Bereitschirm legen. `false`,
+/// wenn keiner eingerichtet oder alle belegt sind.
+fn in_rollenfenster(app: &AppHandle, u: &Url) -> bool {
+    let Some(z) = app.try_state::<AppZustand>() else { return false };
+    let label = {
+        let mut b = z.betrieb.lock().unwrap();
+        let Some(label) = b.freier_traeger().map(|t| t.label.clone()) else { return false };
+        if app.get_webview_window(&label).is_none() {
+            return false;
+        }
+        if let Some(t) = b.traeger_mut(&label) {
+            t.belegt = true;
+        }
+        label
+    };
+    let (h, ziel) = (app.clone(), u.clone());
+    // Nicht im Rückruf selbst navigieren: der läuft mitten in WebKits Entscheidung.
+    tauri::async_runtime::spawn(async move {
+        if let Some(w) = h.get_webview_window(&label) {
+            let _ = w.navigate(ziel);
+        }
+    });
+    true
 }
 
 static NEBENFENSTER: AtomicUsize = AtomicUsize::new(1);
@@ -1141,6 +1181,238 @@ fn nebenfenster_bauen(app: &AppHandle, features: NewWindowFeatures) -> tauri::Re
     Ok(w)
 }
 
+// ── Betriebsmodus (#1377, betriebsmodus.rs) ──────────────────────────────────
+
+/// Lokale Seite für Rollenfenster und Übersicht, neben dem Assistenten.
+fn betrieb_seite(app: &AppHandle) -> Option<Url> {
+    let z = app.try_state::<AppZustand>()?;
+    let start = z.startseite.lock().unwrap().clone()?;
+    start.join(betriebsmodus::SEITE).ok()
+}
+
+/// Name des Bildschirms, auf dem das Fenster steht. Unter Wayland kennt der
+/// Client keine globalen Koordinaten, wohl aber den Ausgang, den der
+/// Compositor der Fläche zugeteilt hat.
+fn schirmname(w: &tauri::WebviewWindow) -> Option<String> {
+    let m = w.current_monitor().ok().flatten()?;
+    Some(m.name().cloned().unwrap_or_else(|| format!("{}×{} bei {},{}", m.size().width, m.size().height, m.position().x, m.position().y)))
+}
+
+/// Knopf „Betriebsmodus“: prüfen, Rollenfenster und Übersicht öffnen.
+fn betrieb_starten(app: &AppHandle) {
+    let Some(haupt) = app.get_webview_window("main") else { return };
+    betrieb_abbrechen_intern(app);
+    let anzahl = haupt.available_monitors().map(|m| m.len()).unwrap_or(0);
+    if let Some(klage) = betriebsmodus::fehlt_ein_bildschirm(anzahl) {
+        // Zu wenige Bildschirme: nichts passiert, auch das Vollbild bleibt.
+        let _ = haupt.eval(&format!("alert({})", serde_json::to_string(&klage).unwrap_or_default()));
+        return;
+    }
+    // Das Vollbild fällt sofort: Sobald ein zweites Fenster im Spiel ist,
+    // wandert der Mauszeiger, und eine Vollbildfläche wird auf dem Regieplatz
+    // schwarz, sobald er sie verlässt (#165). Maximiert bleibt das Cockpit,
+    // wo es steht; F11 holt das Vollbild zurück.
+    if haupt.is_fullscreen().unwrap_or(false) {
+        vollbild_setzen(app, false);
+    }
+    let _ = haupt.maximize();
+    let nummern: Vec<usize> = {
+        let z = app.state::<AppZustand>();
+        let mut b = z.betrieb.lock().unwrap();
+        *b = betriebsmodus::Betrieb::einrichten();
+        b.traeger.iter().map(|t| t.nummer).collect()
+    };
+    for n in nummern {
+        if let Err(e) = rollenfenster_bauen(app, n) {
+            eprintln!("Rollenfenster {n} lässt sich nicht öffnen: {e}");
+            betrieb_abbrechen_intern(app);
+            return;
+        }
+    }
+    if let Err(e) = einrichtung_bauen(app) {
+        eprintln!("Übersicht des Betriebsmodus lässt sich nicht öffnen: {e}");
+        betrieb_abbrechen_intern(app);
+    }
+}
+
+/// Ein Rollenfenster: rahmenlos, mit großer Nummer (lokale Seite), zum
+/// Ziehen. Bewusst nicht maximiert, bis der Platz bestätigt ist: Die Nummer
+/// soll neben den anderen Fenstern lesbar sein. Später lädt es ausgegliederte
+/// Inhalte der Oberfläche, darum Login-Abfang (AD4), `__LEADLAB_CLIENT__` und
+/// neue Fenster wie im Nebenfenster.
+fn rollenfenster_bauen(app: &AppHandle, nummer: usize) -> tauri::Result<tauri::WebviewWindow> {
+    let rolle = betriebsmodus::ROLLEN[nummer - 1];
+    let label = format!("{}{nummer}", betriebsmodus::PRAEFIX);
+    let ausgenommen = lokale_seiten(app.config());
+    let mut b = tauri::WebviewWindowBuilder::new(app, &label, WebviewUrl::App(betriebsmodus::SEITE.into()))
+        .title(format!("{nummer} · {} – LeadLab", rolle.name))
+        .decorations(false)
+        .inner_size(920.0, 560.0)
+        .min_inner_size(480.0, 320.0);
+    if let Some(z) = app.try_state::<AppZustand>() {
+        b = b.initialization_script(&lokal::initialisierung(&z.lokal, &ausgenommen));
+    }
+    let h_nav = app.clone();
+    let h_neu = app.clone();
+    let l_nav = label.clone();
+    let w = b
+        .initialization_script(&betriebsmodus::skript(&ausgenommen))
+        .on_navigation(move |u| {
+            if betriebsmodus::ist_freigabe(u) {
+                let (h, l) = (h_nav.clone(), l_nav.clone());
+                tauri::async_runtime::spawn(async move { rolle_freigeben(&h, &l) });
+                return false;
+            }
+            // Andere Pseudo-Adressen (Vollbild) gibt es hier nicht (#165).
+            if u.scheme() == "leadlab" {
+                return false;
+            }
+            !login_abfangen(&h_nav, u, &l_nav)
+        })
+        .on_new_window(move |u, f| neues_fenster(&h_neu, u, f))
+        .build()?;
+    let _ = w.remove_menu();
+    Ok(w)
+}
+
+/// Die Übersicht auf dem Bedienbildschirm. Sie geht beim Mauszeiger auf, und
+/// der steht beim Klick auf „Betriebsmodus“ vor dem Cockpit.
+fn einrichtung_bauen(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    let w = tauri::WebviewWindowBuilder::new(app, betriebsmodus::EINRICHTUNG, WebviewUrl::App(betriebsmodus::SEITE.into()))
+        .title("Betriebsmodus einrichten – LeadLab")
+        .inner_size(640.0, 560.0)
+        .min_inner_size(520.0, 440.0)
+        .center()
+        .build()?;
+    let _ = w.remove_menu();
+    Ok(w)
+}
+
+/// Inhalt zurückgeben: das Fenster bleibt eingerichtet und wartet wieder.
+fn rolle_freigeben(app: &AppHandle, label: &str) {
+    if let Some(z) = app.try_state::<AppZustand>() {
+        if let Some(t) = z.betrieb.lock().unwrap().traeger_mut(label) {
+            t.belegt = false;
+        }
+    }
+    if let (Some(w), Some(seite)) = (app.get_webview_window(label), betrieb_seite(app)) {
+        let _ = w.navigate(seite);
+    }
+}
+
+/// Alles zurück auf Anfang. Der Zustand fällt vor den Fenstern, damit deren
+/// `Destroyed` nichts mehr abzuräumen findet.
+fn betrieb_abbrechen_intern(app: &AppHandle) {
+    if let Some(z) = app.try_state::<AppZustand>() {
+        *z.betrieb.lock().unwrap() = betriebsmodus::Betrieb::default();
+    }
+    for (label, w) in app.webview_windows() {
+        if label.starts_with(betriebsmodus::PRAEFIX) || label == betriebsmodus::EINRICHTUNG {
+            let _ = w.destroy();
+        }
+    }
+}
+
+/// Ein Fenster des Betriebsmodus ist zu. Während der Einrichtung ist das ein
+/// Abbruch wie jeder andere (Übersicht oder Rollenfenster, #182 der
+/// Desktop-App). Danach verliert nur dieser Bildschirm seine Rolle.
+fn betrieb_fenster_weg(app: &AppHandle, label: &str) {
+    let Some(z) = app.try_state::<AppZustand>() else { return };
+    let abbrechen = {
+        let mut b = z.betrieb.lock().unwrap();
+        let betroffen = label == betriebsmodus::EINRICHTUNG || b.traeger.iter().any(|t| t.label == label);
+        if !betroffen {
+            false
+        } else if b.phase == betriebsmodus::Phase::Einrichten {
+            true
+        } else {
+            b.traeger.retain(|t| t.label != label);
+            if b.traeger.is_empty() {
+                b.phase = betriebsmodus::Phase::Aus;
+            }
+            false
+        }
+    };
+    if abbrechen {
+        betrieb_abbrechen_intern(app);
+    }
+}
+
+fn betrieb_plaetze(app: &AppHandle, b: &betriebsmodus::Betrieb) -> Vec<betriebsmodus::Platz> {
+    let cockpit = betriebsmodus::Platz {
+        nummer: 1,
+        rolle: betriebsmodus::ROLLEN[0],
+        schirm: app.get_webview_window("main").and_then(|w| schirmname(&w)),
+        steht: true,
+    };
+    std::iter::once(cockpit)
+        .chain(b.traeger.iter().map(|t| betriebsmodus::Platz {
+            nummer: t.nummer,
+            rolle: t.rolle(),
+            schirm: app.get_webview_window(&t.label).and_then(|w| schirmname(&w)),
+            steht: t.steht,
+        }))
+        .collect()
+}
+
+/// Was die lokale Seite im aufrufenden Fenster zeigt (fragt im Takt).
+#[tauri::command]
+fn betrieb_ansicht(app: AppHandle, window: tauri::WebviewWindow) -> betriebsmodus::Ansicht {
+    let b = app.state::<AppZustand>().betrieb.lock().unwrap().clone();
+    if let Some(t) = b.traeger.iter().find(|t| t.label == window.label()) {
+        return betriebsmodus::Ansicht::Rolle {
+            nummer: t.nummer,
+            rolle: t.rolle(),
+            schirm: schirmname(&window),
+            steht: t.steht,
+            bereit: b.phase == betriebsmodus::Phase::Bereit,
+        };
+    }
+    if window.label() == betriebsmodus::EINRICHTUNG && b.phase == betriebsmodus::Phase::Einrichten {
+        let plaetze = betrieb_plaetze(&app, &b);
+        let klage = betriebsmodus::klage(&plaetze);
+        return betriebsmodus::Ansicht::Einrichtung { plaetze, klage };
+    }
+    betriebsmodus::Ansicht::Aus
+}
+
+/// Rahmenloses Fenster anfassen: Unter Wayland verschiebt der Compositor auf Zuruf.
+#[tauri::command]
+fn betrieb_ziehen(window: tauri::WebviewWindow) {
+    let _ = window.start_dragging();
+}
+
+/// Leertaste: hier bleiben. Maximieren statt Vollbild, Vollbild wäre schwarz (#165).
+#[tauri::command]
+fn betrieb_platz_festlegen(app: AppHandle, window: tauri::WebviewWindow) {
+    if let Some(t) = app.state::<AppZustand>().betrieb.lock().unwrap().traeger_mut(window.label()) {
+        t.steht = true;
+    }
+    let _ = window.maximize();
+}
+
+/// „Betriebsmodus starten“: nur, wenn jede Rolle auf einem eigenen Bildschirm steht.
+#[tauri::command]
+fn betrieb_bestaetigen(app: AppHandle) -> bool {
+    let b = app.state::<AppZustand>().betrieb.lock().unwrap().clone();
+    if b.phase != betriebsmodus::Phase::Einrichten || !betriebsmodus::klage(&betrieb_plaetze(&app, &b)).is_empty() {
+        return false;
+    }
+    app.state::<AppZustand>().betrieb.lock().unwrap().phase = betriebsmodus::Phase::Bereit;
+    if let Some(w) = app.get_webview_window(betriebsmodus::EINRICHTUNG) {
+        let _ = w.destroy();
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_focus();
+    }
+    true
+}
+
+#[tauri::command]
+fn betrieb_abbrechen(app: AppHandle) {
+    betrieb_abbrechen_intern(&app);
+}
+
 /// Hauptfenster aus tauri.conf.json (dort `create: false`), mit dem
 /// Initialisierungsskript `window.__LEADLAB_CLIENT__` für die
 /// Server-Oberfläche. Die lokale Assistentenseite bleibt ausgenommen; IPC hat
@@ -1167,6 +1439,12 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
             if vollbild::ist_ausstieg(u) {
                 let h = handle.clone();
                 tauri::async_runtime::spawn(async move { vollbild_setzen(&h, false) });
+                return false;
+            }
+            // Knopf „Betriebsmodus“ der Startzentrale (#1377).
+            if betriebsmodus::ist_anforderung(u, &eigene_hosts(&handle)) {
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move { betrieb_starten(&h) });
                 return false;
             }
             !login_abfangen(&handle, u, "main")
@@ -1225,12 +1503,20 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Nebenfenster schließen mit dem Hauptfenster (#859).
         .on_window_event(|w, ev| {
-            if w.label() == "main" && matches!(ev, WindowEvent::Destroyed) {
+            if !matches!(ev, WindowEvent::Destroyed) {
+                return;
+            }
+            if w.label() == "main" {
                 for (label, n) in w.app_handle().webview_windows() {
-                    if label.starts_with(nebenfenster::PRAEFIX) {
+                    if label.starts_with(nebenfenster::PRAEFIX)
+                        || label.starts_with(betriebsmodus::PRAEFIX)
+                        || label == betriebsmodus::EINRICHTUNG
+                    {
                         let _ = n.destroy();
                     }
                 }
+            } else {
+                betrieb_fenster_weg(w.app_handle(), w.label());
             }
         })
         .setup(move |app| {
@@ -1266,6 +1552,7 @@ pub fn run() {
                 warten: Mutex::new(None),
                 im_fenster: Mutex::new(None),
                 anmelde_meldung: Mutex::new(None),
+                betrieb: Mutex::new(betriebsmodus::Betrieb::default()),
             });
             if let Some(w) = app.get_webview_window("main") {
                 *app.state::<AppZustand>().startseite.lock().unwrap() = w.url().ok();
@@ -1321,7 +1608,12 @@ pub fn run() {
             konfig_neu_pruefen,
             paket_entfernen,
             ordner_oeffnen,
-            oberflaeche_sitzung_erneuern
+            oberflaeche_sitzung_erneuern,
+            betrieb_ansicht,
+            betrieb_ziehen,
+            betrieb_platz_festlegen,
+            betrieb_bestaetigen,
+            betrieb_abbrechen
         ])
         .run(tauri::generate_context!())
         .expect("LeadLab-Client konnte nicht starten");

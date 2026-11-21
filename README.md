@@ -185,6 +185,40 @@ Systembrowser, alles andere wird verworfen. Knopf und Tasten laufen über
 `leadlab://fenster-schliessen` und `leadlab://vollbild-umschalten`; IPC hat
 auch das Nebenfenster nicht.
 
+## Betriebsmodus: drei Bildschirme am Regieplatz
+
+Der Knopf **„Betriebsmodus“** der Startzentrale richtet den Regieplatz ein wie
+in der Desktop-App (Hauptrepo #1377, Vorbild #165, Konzept Übungseinsatz und
+Rollen §5.1). Die Startzentrale erkennt den Client an
+`window.__LEADLAB_CLIENT__`, der Client fängt die Navigation auf
+`/betriebsmodus` ab.
+
+1. Sind weniger als drei Bildschirme angeschlossen, nennt ein Hinweis die
+   Zahl, und sonst passiert nichts.
+2. Das Hauptfenster verlässt das Vollbild und bleibt maximiert als Cockpit
+   stehen. Eine Vollbildfläche wird auf dem Regieplatz schwarz, sobald der
+   Mauszeiger den Monitor verlässt.
+3. Für **Lagekarte** (2) und **Simulation** (3) geht je ein rahmenloses
+   Fenster mit großer Nummer auf. Hineinklicken und auf den Bildschirm ziehen,
+   dort **Leertaste**: Das Fenster maximiert sich an Ort und Stelle. Unter
+   Wayland darf der Client Fenster nicht selbst platzieren, er liest nur ab,
+   wo sie gelandet sind.
+4. Die Übersicht *Bildschirme einrichten* zeigt, welche Rolle auf welchem
+   Bildschirm steht. **Betriebsmodus starten** geht erst, wenn jede Rolle auf
+   einem eigenen Bildschirm steht. `Esc`, **Abbrechen** oder Schließen eines
+   der Fenster bricht ab.
+
+Danach warten beide Fenster als Bereitschirme. Was die Oberfläche ausgliedert,
+wandert **in** sie hinein, erst Lagekarte, dann Simulation. Sind beide
+belegt, entsteht wie sonst ein Nebenfenster. Stabssicht (Beamer) und
+Einspiel-Bildschirm gehören auf ein eigenes Gerät und belegen nie einen
+Bereitschirm, Druckfenster (`about:blank`) ebenso nicht. **✕ Freigeben**
+unten rechts, Strg+W oder `window.close()` der Seite (Übungsende) geben den
+Bildschirm zurück. Er bleibt eingerichtet und wartet wieder. Vollbild (F11)
+gibt es in den Rollenfenstern nicht. Rollenfenster und Übersicht zeigen die
+lokale Seite `betrieb.html` (IPC-Rechte wie der Assistent). Ausgegliederte
+Inhalte darin haben keine, Freigeben läuft über `leadlab://rolle-freigeben`.
+
 ## Linux: keine Tastatureingabe
 
 Setzt die Desktop-Sitzung `GTK_IM_MODULE=ibus` (oder `fcitx`) und
@@ -288,12 +322,14 @@ ein.
 | `src-tauri/src/pmtiles.rs` | PMTiles v3 lesen (Hilbert-Ids, Blattverzeichnisse) |
 | `src-tauri/src/vollbild.rs` | Kommandozeile, Monitorwahl, Schwebeknopf-Skript |
 | `src-tauri/src/nebenfenster.rs` | Neue Fenster: Zielentscheidung, Zweitschirm, Schließknopf-Skript |
+| `src-tauri/src/betriebsmodus.rs` | Betriebsmodus: Rollen, Bildschirmprüfung, Verteilung, Bereitschirme, Freigabe-Skript |
+| `betrieb.html`, `src/betrieb.ts`, `src/betriebAnsicht.ts` | Lokale Seite der Rollenfenster und der Übersicht |
 | `src-tauri/src/eingabemethode.rs` | Linux: ohne laufenden ibus-/fcitx-Daemon auf `gtk-im-context-simple` ausweichen |
 | `src-tauri/src/uebersicht.rs` | Pakettabelle, Paketstand nach dem Download, Paket entfernen |
 | `src-tauri/src/lib.rs` | Tauri-Befehle, Menü, Navigation zur Server-Oberfläche, Vollbild |
 
-**Sicherheit:** IPC-Rechte hat nur die lokale Assistentenseite
-(`capabilities/default.json` ohne `remote`). Die Server-Oberfläche im selben
+**Sicherheit:** IPC-Rechte haben nur die lokalen Seiten, also Assistent und
+Betriebsmodus (`capabilities/default.json` ohne `remote`). Die Server-Oberfläche im selben
 Fenster kann keine Befehle aufrufen. Ein Katalog kann nicht außerhalb des
 Datenordners schreiben (`ablage::sicherer_pfad`).
 

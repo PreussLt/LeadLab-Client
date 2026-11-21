@@ -6,6 +6,10 @@ export default defineConfig({
   clearScreen: false,
   server: { port: 1420, strictPort: true },
   envPrefix: ['VITE_', 'TAURI_ENV_'],
-  build: { target: 'es2021', outDir: 'dist', emptyOutDir: true },
+  // Zweite Seite für die Fenster des Betriebsmodus (Hauptrepo #1377).
+  build: {
+    target: 'es2021', outDir: 'dist', emptyOutDir: true,
+    rollupOptions: { input: { main: 'index.html', betrieb: 'betrieb.html' } },
+  },
   test: { environment: 'jsdom' },
 })

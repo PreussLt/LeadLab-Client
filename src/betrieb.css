@@ -1,0 +1,31 @@
+/* Betriebsmodus (#1377): Nummer und Rolle werden quer durch den
+ * abgedunkelten Regieraum gelesen, nicht am Platz. */
+#betrieb { height: 100%; }
+.betrieb-rolle {
+  height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 16px; padding: 24px; text-align: center; cursor: grab; user-select: none;
+}
+.betrieb-nummer { font-size: 180px; font-weight: 700; line-height: 1; color: rgb(var(--farbe-titel)); }
+.betrieb-marke { font-size: 64px; font-weight: 700; color: var(--ffw-rot); }
+.betrieb-rollenzeile { font-size: 22px; color: rgb(var(--farbe-titel)); }
+.betrieb-lage, .betrieb-matt { color: rgb(var(--farbe-nebentext)); }
+.betrieb-lage { font-size: 17px; }
+.betrieb-hinweis { font-size: 16px; color: rgb(var(--farbe-nebentext)); max-width: 40em; margin: 0; }
+.betrieb-einrichtung { padding: 24px 28px; display: flex; flex-direction: column; gap: 18px; text-align: center; }
+.betrieb-einrichtung h1 { margin: 0; font-size: 26px; color: rgb(var(--farbe-titel)); }
+.betrieb-einrichtung p { margin: 0; }
+.betrieb-plaetze { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.betrieb-platz {
+  display: flex; gap: 12px; align-items: baseline; padding: 10px 14px; border-radius: 10px;
+  background: rgb(var(--farbe-panel)); border: 1px solid rgb(var(--farbe-rand)); font-size: 15px;
+}
+.betrieb-platz .betrieb-matt { margin-left: auto; }
+.betrieb-klage { font-size: 14px; color: rgb(var(--farbe-nebentext)); }
+.betrieb-knoepfe { display: flex; gap: 12px; justify-content: center; }
+.betrieb-primaer, .betrieb-zweitrangig {
+  min-height: 48px; padding: 10px 22px; border-radius: 8px; font: 600 16px 'Open Sans', system-ui, sans-serif; cursor: pointer;
+}
+.betrieb-primaer { background: var(--ffw-rot); color: #fff; border: none; }
+.betrieb-primaer:disabled { background: rgb(var(--farbe-stufe)); color: rgb(var(--farbe-nebentext)); cursor: default; }
+.betrieb-zweitrangig { background: rgb(var(--farbe-stufe)); color: rgb(var(--farbe-text)); border: 1px solid rgb(var(--farbe-rand-stark)); }
+.betrieb-primaer:focus-visible, .betrieb-zweitrangig:focus-visible { outline: 2px solid rgb(var(--farbe-fokus)); outline-offset: 2px; }
