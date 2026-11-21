@@ -157,6 +157,21 @@ pub fn gleiche_herkunft(start: &Url, jetzt: &Url) -> bool {
         && start.port_or_known_default() == jetzt.port_or_known_default()
 }
 
+/// Herkunft als Text wie `location.origin` im Browser (`tauri://localhost`,
+/// `http://uebung.lead.lab`). Nicht `origin().ascii_serialization()`: Das
+/// ergibt für `tauri://localhost` (opaker Ursprung) nur `"null"` (#1357).
+pub fn herkunft_text(u: &Url) -> String {
+    let o = u.origin();
+    if o.is_tuple() {
+        return o.ascii_serialization();
+    }
+    let host = u.host_str().unwrap_or("");
+    match u.port() {
+        Some(p) => format!("{}://{host}:{p}", u.scheme()),
+        None => format!("{}://{host}", u.scheme()),
+    }
+}
+
 /// Ist das eine Ausstiegs-Anforderung der Seite?
 pub fn ist_ausstieg(u: &Url) -> bool {
     u.scheme() == "leadlab" && u.host_str() == Some("vollbild-aus")
@@ -312,6 +327,18 @@ mod tests {
         assert!(!gleiche_herkunft(&u("tauri://localhost/"), &u("http://uebung.lead.lab/")));
         assert!(!gleiche_herkunft(&u("http://tauri.localhost/"), &u("http://uebung.lead.lab/")));
         assert!(!gleiche_herkunft(&u("http://localhost:1420/"), &u("http://localhost:11201/")), "Port zählt");
+    }
+
+    /// #1357: Der Assistent unter Linux zählt als lokale Seite.
+    #[test]
+    fn herkunft_wie_location_origin() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        assert_eq!(herkunft_text(&u("tauri://localhost/#einstellungen")), "tauri://localhost");
+        assert_eq!(herkunft_text(&u("http://tauri.localhost/")), "http://tauri.localhost");
+        assert_eq!(herkunft_text(&u("http://uebung.lead.lab/lage/3")), "http://uebung.lead.lab");
+        assert_eq!(herkunft_text(&u("http://localhost:1420/")), "http://localhost:1420");
+        assert_eq!(herkunft_text(&u("https://lead.lab:443/")), "https://lead.lab", "Standardport fällt weg");
+        assert_eq!(herkunft_text(&u("leadlab://vollbild-aus")), "leadlab://vollbild-aus");
     }
 
     #[test]

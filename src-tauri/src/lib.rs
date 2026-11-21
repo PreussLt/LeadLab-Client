@@ -1180,7 +1180,7 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
                 let _ = w.eval(&vollbild::zustand_skript(an));
                 // Für die Einstellungsseite (#792): wann die Oberfläche mit
                 // `__LEADLAB_CLIENT__` zuletzt geladen wurde.
-                let herkunft = p.url().origin().ascii_serialization();
+                let herkunft = vollbild::herkunft_text(p.url());
                 if !lokale_seiten.contains(&herkunft) && p.url().scheme() != "about" {
                     if let Some(z) = w.try_state::<AppZustand>() {
                         *z.zuletzt_geladen.lock().unwrap() = Some((herkunft, jetzt()));
