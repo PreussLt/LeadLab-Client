@@ -906,7 +906,7 @@ fn auf_startseite(app: &AppHandle, z: &AppZustand) -> bool {
     let start = z.startseite.lock().unwrap().clone();
     let jetzt = app.get_webview_window("main").and_then(|w| w.url().ok());
     match (start, jetzt) {
-        (Some(s), Some(j)) => s.origin() == j.origin(),
+        (Some(s), Some(j)) => vollbild::gleiche_herkunft(&s, &j),
         _ => true,
     }
 }

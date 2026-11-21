@@ -145,6 +145,18 @@ pub fn sondierpunkt(rechtecke: &[Rechteck], ziel: usize) -> Option<(i32, i32)> {
         .find(|&(x, y)| rechtecke.iter().position(|o| o.enthaelt(x, y)) == Some(ziel))
 }
 
+/// Zeigt `jetzt` dieselbe Herkunft wie die Startseite (Assistent)?
+///
+/// Nicht über `Url::origin()`: Für `tauri://localhost` (Assistent unter
+/// Linux und macOS) ist der Ursprung opak, und zwei opake Ursprünge sind nie
+/// gleich — der Übergang Assistent → Oberfläche schaltete dort darum nie ins
+/// Vollbild (#1352). Verglichen werden Schema, Host und Port.
+pub fn gleiche_herkunft(start: &Url, jetzt: &Url) -> bool {
+    start.scheme() == jetzt.scheme()
+        && start.host_str() == jetzt.host_str()
+        && start.port_or_known_default() == jetzt.port_or_known_default()
+}
+
 /// Ist das eine Ausstiegs-Anforderung der Seite?
 pub fn ist_ausstieg(u: &Url) -> bool {
     u.scheme() == "leadlab" && u.host_str() == Some("vollbild-aus")
@@ -288,6 +300,18 @@ mod tests {
         let verdeckt = [Rechteck { x: 0, y: 0, breite: 4000, hoehe: 2000 }, Rechteck { x: 10, y: 10, breite: 100, hoehe: 100 }];
         assert_eq!(sondierpunkt(&verdeckt, 1), None);
         assert_eq!(sondierpunkt(&verdeckt, 5), None);
+    }
+
+    /// #1352: Unter Linux läuft der Assistent auf tauri://localhost.
+    #[test]
+    fn startseite_auch_unter_tauri_schema() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        assert!(gleiche_herkunft(&u("tauri://localhost/"), &u("tauri://localhost/#start")), "Linux/macOS");
+        assert!(gleiche_herkunft(&u("http://tauri.localhost/"), &u("http://tauri.localhost/#anmeldung")), "Windows");
+        assert!(gleiche_herkunft(&u("http://localhost:1420/"), &u("http://localhost:1420/index.html")), "Entwicklung");
+        assert!(!gleiche_herkunft(&u("tauri://localhost/"), &u("http://uebung.lead.lab/")));
+        assert!(!gleiche_herkunft(&u("http://tauri.localhost/"), &u("http://uebung.lead.lab/")));
+        assert!(!gleiche_herkunft(&u("http://localhost:1420/"), &u("http://localhost:11201/")), "Port zählt");
     }
 
     #[test]
