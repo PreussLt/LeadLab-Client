@@ -26,6 +26,7 @@ pub mod betriebsmodus;
 pub mod eingabemethode;
 pub mod einstellungen;
 pub mod fehler;
+pub mod geste;
 pub mod katalog;
 pub mod konfig;
 pub mod laden;
@@ -1176,6 +1177,8 @@ fn nebenfenster_bauen(app: &AppHandle, features: NewWindowFeatures) -> tauri::Re
         })
         .on_new_window(move |u, f| neues_fenster(&h_neu, u, f))
         .build()?;
+    // Zoom-Geste an die Karte statt an die Seite (#1387).
+    geste::umleiten(&w);
     // Das Menü gehört dem Hauptfenster (Assistent, Server, Abmelden).
     let _ = w.remove_menu();
     Ok(w)
@@ -1271,6 +1274,7 @@ fn rollenfenster_bauen(app: &AppHandle, nummer: usize) -> tauri::Result<tauri::W
         })
         .on_new_window(move |u, f| neues_fenster(&h_neu, u, f))
         .build()?;
+    geste::umleiten(&w);
     let _ = w.remove_menu();
     Ok(w)
 }
@@ -1430,7 +1434,7 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
     let handle = app.handle().clone();
     let h_neu = app.handle().clone();
     let lokale_seiten = ausgenommen.clone();
-    tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
+    let w = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
         .initialization_script(&lokal::initialisierung(lokal, &ausgenommen))
         .initialization_script(&vollbild::skript(&ausgenommen))
         // Ausstieg aus dem Vollbild per Pseudo-Adresse: Navigation abbrechen,
@@ -1467,6 +1471,8 @@ fn hauptfenster(app: &tauri::App, lokal: &lokal::Lokal) -> tauri::Result<()> {
             }
         })
         .build()?;
+    // Zoom-Geste auf dem Touchpad an die Karte statt an die Seite (#1387).
+    geste::umleiten(&w);
     Ok(())
 }
 
